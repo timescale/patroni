@@ -313,6 +313,7 @@ validate_etcd = {
 
 schema = Schema({
   "name": str,
+  Optional("static_primary"): str,
   "scope": str,
   "restapi": {
     "listen": validate_host_port_listen,
