@@ -10,7 +10,7 @@ Version 2.2.0
 
 - Added support for ``static_primary`` configuration (Anthony Dodd)
 
-  This can be configured using the ``static_primary=<name>`` config value, which enables a few optimizations to ensure that a cluster configured with a static primary will not unnecessarily demote the cluster primary. This is useful for cases where a cluster is running as a single-node cluster. When this value is configured in the DCS, replicas will refuse to boot until the config value is removed.
+  This can be configured using the ``static_primary=<name>`` config value, which enables a few optimizations to ensure that a cluster configured with a static primary will not unnecessarily demote the cluster primary. This is useful for cases where a cluster is running as a single-node cluster. When this value is set, replicas will refuse to boot until the config value is removed from DCS config.
 
 Version 2.1.3
 -------------

@@ -313,7 +313,6 @@ validate_etcd = {
 
 schema = Schema({
   "name": str,
-  Optional("static_primary"): str,
   "scope": str,
   "restapi": {
     "listen": validate_host_port_listen,
@@ -324,8 +323,9 @@ schema = Schema({
         Optional("ttl"): int,
         Optional("loop_wait"): int,
         Optional("retry_timeout"): int,
-        Optional("maximum_lag_on_failover"): int
-        },
+        Optional("maximum_lag_on_failover"): int,
+        Optional("static_primary"): str
+    },
     "pg_hba": [str],
     "initdb": [Or(str, dict)]
   },

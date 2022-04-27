@@ -248,7 +248,7 @@ class Config(object):
         def _popenv(name):
             return os.environ.pop(PATRONI_ENV_PREFIX + name.upper(), None)
 
-        for param in ('name', 'namespace', 'scope', 'static_primary'):
+        for param in ('name', 'namespace', 'scope'):
             value = _popenv(param)
             if value:
                 ret[param] = value
@@ -428,10 +428,6 @@ class Config(object):
         # no 'name' in config
         if 'name' not in config and 'name' in pg_config:
             config['name'] = pg_config['name']
-
-        # if 'static_primary' not in config and 'static_primary' in local_configuration
-        if 'static_primary' in local_configuration:
-            config['static_primary'] = local_configuration['static_primary']
 
         updated_fields = (
             'name',

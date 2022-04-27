@@ -11,7 +11,6 @@ Global/Universal
 -  **PATRONI\_NAME**: name of the node where the current instance of Patroni is running. Must be unique for the cluster.
 -  **PATRONI\_NAMESPACE**: path within the configuration store where Patroni will keep information about the cluster. Default value: "/service"
 -  **PATRONI\_SCOPE**: cluster name
--  **PATRONI\_STATIC\_PRIMARY**: enables a few optimizations to ensure that a cluster configured with a static primary will not unnecessarily demote the cluster primary. This is useful for cases where a cluster is running as a single-node cluster. When this value is configured in the DCS, replicas will refuse to boot until the config value is removed.
 
 Log
 ---
