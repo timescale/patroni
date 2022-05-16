@@ -1371,8 +1371,10 @@ class Ha(object):
             # If the cluster has been configured with a static primary,
             # and we are not that primary, then do not proceed.
             if self.is_static_primary_configured() and not self.is_static_primary():
+                self.shutdown()
                 return 'patroni cluster is configured with a static primary, \
-                        and this node is not the primary, refusing to start'
+                        and this node is not the primary, shutting down and \
+                        refusing to start'
 
             if self.is_paused():
                 self.watchdog.disable()
