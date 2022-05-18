@@ -702,9 +702,10 @@ class Ha(object):
     def is_failover_possible(self, members, check_synchronous=True, cluster_lsn=None):
         ret = False
         cluster_timeline = self.cluster.timeline
-        is_static_primary = self.is_static_primary()
-        members = [m for m in members if m.name != self.state_handler.name
-                   and not m.nofailover and m.api_url and not is_static_primary]
+        if self.is_static_primary():
+            logger.warning('manual failover: not possible when instance is static primary')
+            return ret
+        members = [m for m in members if m.name != self.state_handler.name and not m.nofailover and m.api_url]
         if check_synchronous and self.is_synchronous_mode():
             members = [m for m in members if self.cluster.sync.matches(m.name)]
         if members:
