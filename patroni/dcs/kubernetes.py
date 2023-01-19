@@ -238,7 +238,7 @@ class K8sClient(object):
             self._api_servers_cache_ttl = ttl - 0.5
 
         def set_base_uri(self, value):
-            logger.info('Selected new K8s API server endpoint %s', value)
+            logger.warning('Selected new K8s API server endpoint %s', value)
             # We will connect by IP of the master node which is not listed as alternative name
             self.pool_manager.connection_pool_kw['assert_hostname'] = False
             self._base_uri = value
@@ -347,7 +347,7 @@ class K8sClient(object):
             some_request_failed = False
             for i, base_uri in enumerate(api_servers_cache):
                 if i > 0:
-                    logger.info('Retrying on %s', base_uri)
+                    logger.warning('Retrying on %s', base_uri)
                 try:
                     response = self.pool_manager.request(method, base_uri + path, **kwargs)
                     if some_request_failed:
@@ -1021,7 +1021,10 @@ class Kubernetes(AbstractDCS):
             return retry(*args, **kwargs)
 
         try:
-            return self._patch_or_create(self.leader_path, annotations, resource_version, ips=ips, retry=_retry)
+            patched = self._patch_or_create(self.leader_path, annotations, resource_version, ips=ips, retry=_retry)
+            logger.warning("self._patch_or_create succeeded: %s", patched)
+            return patched
+
         except k8s_client.rest.ApiException as e:
             if e.status == 409:
                 logger.warning('Concurrent update of %s', self.leader_path)
@@ -1029,17 +1032,23 @@ class Kubernetes(AbstractDCS):
                 logger.exception('Permission denied' if e.status == 403 else 'Unexpected error from Kubernetes API')
                 return False
         except (RetryFailedError, K8sException) as e:
+            logger.warning("self._patch_or_create failed with Retry/K8sException: %r", e)
             raise KubernetesError(e)
+        except Exception as e:
+            logger.warning("self._patch_or_create failed with unhandled error: %r", e)
+            raise e
 
         # if we are here, that means update failed with 409
         retry.deadline = retry.stoptime - time.time()
         if retry.deadline < 1:
+            logger.warning("_update_leader_with_retry exceeded deadline 1")
             return False  # No time for retry. Tell ha.py that we have to demote due to failed update.
 
         # Try to get the latest version directly from K8s API instead of relying on async cache
         try:
             kind = _retry(self._api.read_namespaced_kind, self.leader_path, self._namespace)
         except (RetryFailedError, K8sException) as e:
+            logger.warning("read_namespaced_kind failed with Retry/K8sException: %r", e)
             raise KubernetesError(e)
         except Exception as e:
             logger.error('Failed to get the leader object "%s": %r', self.leader_path, e)
@@ -1049,6 +1058,7 @@ class Kubernetes(AbstractDCS):
 
         retry.deadline = retry.stoptime - time.time()
         if retry.deadline < 0.5:
+            logger.warning("_update_leader_with_retry exceeded deadline 2")
             return False
 
         kind_annotations = kind and kind.metadata.annotations or {}
@@ -1056,10 +1066,18 @@ class Kubernetes(AbstractDCS):
 
         # There is different leader or resource_version in cache didn't change
         if kind and (kind_annotations.get(self._LEADER) != self._name or kind_resource_version == resource_version):
+            logger.warning("leader has changed")
             return False
 
-        return self._run_and_handle_exceptions(self._patch_or_create, self.leader_path, annotations,
+        try:
+            success = self._run_and_handle_exceptions(self._patch_or_create, self.leader_path, annotations,
                                                kind_resource_version, ips=ips, retry=_retry)
+            logger.warning("self._run_and_handle_exceptions succeeded: %s", success)
+            return success
+        except Exception as e:
+            logger.warning("self._run_and_handle_exceptions threw unhandled exception: %r", e)
+            raise e
+
 
     def update_leader(self, last_lsn, slots=None, failsafe=None):
         kind = self._kinds.get(self.leader_path)
@@ -1113,7 +1131,7 @@ class Kubernetes(AbstractDCS):
             raise KubernetesError(e)
 
         if not ret:
-            logger.info('Could not take out TTL lock')
+            logger.warning('Could not take out TTL lock')
         return ret
 
     def take_leader(self):
