@@ -1021,9 +1021,7 @@ class Kubernetes(AbstractDCS):
             return retry(*args, **kwargs)
 
         try:
-            patched = self._patch_or_create(self.leader_path, annotations, resource_version, ips=ips, retry=_retry)
-            logger.warning("self._patch_or_create succeeded: %s", patched)
-            return patched
+            return self._patch_or_create(self.leader_path, annotations, resource_version, ips=ips, retry=_retry)
 
         except k8s_client.rest.ApiException as e:
             if e.status == 409:
