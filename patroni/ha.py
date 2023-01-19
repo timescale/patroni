@@ -1682,6 +1682,7 @@ class Ha(object):
                     self.set_is_leader(True)
                     self._failsafe.set_is_active(time.time())
                     self.watchdog.keepalive()
+                    logger.info('continue to run as a leader because failsafe mode is enabled and all members are accessible')
                     return 'continue to run as a leader because failsafe mode is enabled and all members are accessible'
                 self._failsafe.set_is_active(0)
                 msg = 'demoting self because DCS is not accessible and I was a leader'
