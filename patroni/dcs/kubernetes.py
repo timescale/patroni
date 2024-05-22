@@ -1321,11 +1321,19 @@ class Kubernetes(AbstractDCS):
 
         member = cluster and cluster.get_member(self._name, fallback_to_leader=False)
         pod_labels = member and member.data.pop('pod_labels', None)
+        # XXX: add a parameter here
+        saved_xlog_location = data.get('xlog_location')
+        if saved_xlog_location is not None and True:
+            # avoid updating if the only change is the xlog location
+            if member.data.get('xlog_location') is not None:
+                data['xlog_location'] = member.data['xlog_location']
         ret = member and pod_labels is not None\
             and all(pod_labels.get(k) == v for k, v in role_labels.items())\
             and deep_compare(data, member.data)
 
         if not ret:
+            # we decided to update anyway, set back the xlog location
+            data['xlog_location'] = saved_xlog_location
             metadata = {'namespace': self._namespace, 'name': self._name, 'labels': role_labels,
                         'annotations': {'status': json.dumps(data, separators=(',', ':'))}}
             body = k8s_client.V1Pod(metadata=k8s_client.V1ObjectMeta(**metadata))
