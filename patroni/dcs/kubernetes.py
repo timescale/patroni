@@ -24,7 +24,7 @@ from ..collections import EMPTY_DICT
 from ..exceptions import DCSError
 from ..postgresql.mpp import AbstractMPP
 from ..utils import deep_compare, iter_response_objects, keepalive_socket_options, \
-    Retry, RetryFailedError, tzutc, uri, USER_AGENT
+    parse_bool, Retry, RetryFailedError, tzutc, uri, USER_AGENT
 if TYPE_CHECKING:  # pragma: no cover
     from ..config import Config
 
@@ -758,6 +758,8 @@ class Kubernetes(AbstractDCS):
         self._standby_leader_label_value = config.get('standby_leader_label_value', 'master')
         self._tmp_role_label = config.get('tmp_role_label')
         self._ca_certs = os.environ.get('PATRONI_KUBERNETES_CACERT', config.get('cacert')) or SERVICE_CERT_FILENAME
+        self._prevent_xlog_position_only_pod_updates = bool(
+            parse_bool(config.get('prevent_xlog_position_only_pod_updates')))
         super(Kubernetes, self).__init__({**config, 'namespace': ''}, mpp)
         if self._mpp.is_enabled():
             self._labels[self._mpp.k8s_group_label] = str(self._mpp.group)
@@ -1323,9 +1325,9 @@ class Kubernetes(AbstractDCS):
         pod_labels = member and member.data.pop('pod_labels', None)
         # XXX: add a parameter here
         saved_xlog_location = data.get('xlog_location')
-        if saved_xlog_location is not None and True:
+        if self._prevent_xlog_position_only_pod_updates and saved_xlog_location is not None:
             # avoid updating if the only change is the xlog location
-            if member.data.get('xlog_location') is not None:
+            if member and member.data.get('xlog_location') is not None:
                 data['xlog_location'] = member.data['xlog_location']
         ret = member and pod_labels is not None\
             and all(pod_labels.get(k) == v for k, v in role_labels.items())\
@@ -1333,7 +1335,7 @@ class Kubernetes(AbstractDCS):
 
         if not ret:
             # we decided to update anyway, set back the xlog location
-            data['xlog_location'] = saved_xlog_location
+            data['xlog_location'] =  saved_xlog_location
             metadata = {'namespace': self._namespace, 'name': self._name, 'labels': role_labels,
                         'annotations': {'status': json.dumps(data, separators=(',', ':'))}}
             body = k8s_client.V1Pod(metadata=k8s_client.V1ObjectMeta(**metadata))
