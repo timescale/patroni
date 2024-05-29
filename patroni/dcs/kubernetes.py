@@ -1305,7 +1305,7 @@ class Kubernetes(AbstractDCS):
     def set_config_value(self, value: str, version: Optional[str] = None) -> bool:
         return self.patch_or_create_config({self._CONFIG: value}, version, bool(self._config_resource_version), False)
 
-    def _get_cached_xlog_location(self) -> [Optional[str], Optional[float]]:
+    def _get_cached_xlog_location(self) -> Tuple[Optional[str], Optional[float]]:
         return self._cached_xlog_location, self._cached_xlog_location_modified_timestamp
 
     def _set_cached_xlog_location(self, location: str) -> None:
