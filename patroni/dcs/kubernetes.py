@@ -24,7 +24,7 @@ from ..collections import EMPTY_DICT
 from ..exceptions import DCSError
 from ..postgresql.mpp import AbstractMPP
 from ..utils import deep_compare, iter_response_objects, keepalive_socket_options, \
-    parse_bool, Retry, RetryFailedError, tzutc, uri, USER_AGENT
+    parse_int, Retry, RetryFailedError, tzutc, uri, USER_AGENT
 if TYPE_CHECKING:  # pragma: no cover
     from ..config import Config
 
@@ -758,8 +758,9 @@ class Kubernetes(AbstractDCS):
         self._standby_leader_label_value = config.get('standby_leader_label_value', 'master')
         self._tmp_role_label = config.get('tmp_role_label')
         self._ca_certs = os.environ.get('PATRONI_KUBERNETES_CACERT', config.get('cacert')) or SERVICE_CERT_FILENAME
-        self._prevent_xlog_position_only_pod_updates = bool(
-            parse_bool(config.get('prevent_xlog_position_only_pod_updates')))
+        self._xlog_location_cache_ttl = parse_int(config.get('xlog_location_cache_ttl', '0'), 's') or 0
+        self._cached_xlog_location_modified_timestamp = None
+        self._cached_xlog_location = None
         super(Kubernetes, self).__init__({**config, 'namespace': ''}, mpp)
         if self._mpp.is_enabled():
             self._labels[self._mpp.k8s_group_label] = str(self._mpp.group)
@@ -1304,6 +1305,13 @@ class Kubernetes(AbstractDCS):
     def set_config_value(self, value: str, version: Optional[str] = None) -> bool:
         return self.patch_or_create_config({self._CONFIG: value}, version, bool(self._config_resource_version), False)
 
+    def _get_cached_xlog_location(self) -> [Optional[str], Optional[float]]:
+        return self._cached_xlog_location, self._cached_xlog_location_modified_timestamp
+
+    def _set_cached_xlog_location(self, location: str) -> None:
+        self._cached_xlog_location = location
+        self._cached_xlog_location_modified_timestamp = time.time()
+
     @catch_kubernetes_errors
     def touch_member(self, data: Dict[str, Any]) -> bool:
         cluster = self.cluster
@@ -1323,19 +1331,26 @@ class Kubernetes(AbstractDCS):
 
         member = cluster and cluster.get_member(self._name, fallback_to_leader=False)
         pod_labels = member and member.data.pop('pod_labels', None)
-        # XXX: add a parameter here
-        saved_xlog_location = data.get('xlog_location')
-        if self._prevent_xlog_position_only_pod_updates and saved_xlog_location is not None:
-            # avoid updating if the only change is the xlog location
-            if member and member.data.get('xlog_location') is not None:
-                data['xlog_location'] = member.data['xlog_location']
+
+        replaced_xlog_location = data['xlog_location']
+        cached_xlog_location, last_updated = self._get_cached_xlog_location()
+        if last_updated is not None and last_updated + self._xlog_location_cache_ttl > time.time():
+            if cached_xlog_location is not None:
+                data['xlog_location'] = cached_xlog_location
+        else:
+            # location cache expired
+            self._set_cached_xlog_location(data['xlog_location'])
+            replaced_xlog_location = None
         ret = member and pod_labels is not None\
             and all(pod_labels.get(k) == v for k, v in role_labels.items())\
             and deep_compare(data, member.data)
 
         if not ret:
-            # we decided to update anyway, set back the xlog location
-            data['xlog_location'] =  saved_xlog_location
+            # if we move forward with an update anyway, make sure to write the actual
+            # value for the xlog, and not the stale cached value.
+            if replaced_xlog_location is not None:
+                self._set_cached_xlog_location(replaced_xlog_location)
+                data['xlog_location'] = replaced_xlog_location
             metadata = {'namespace': self._namespace, 'name': self._name, 'labels': role_labels,
                         'annotations': {'status': json.dumps(data, separators=(',', ':'))}}
             body = k8s_client.V1Pod(metadata=k8s_client.V1ObjectMeta(**metadata))
