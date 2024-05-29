@@ -1332,14 +1332,14 @@ class Kubernetes(AbstractDCS):
         member = cluster and cluster.get_member(self._name, fallback_to_leader=False)
         pod_labels = member and member.data.pop('pod_labels', None)
 
-        replaced_xlog_location = data['xlog_location']
+        replaced_xlog_location: Optional[str] = data.get('xlog_location', None)
         cached_xlog_location, last_updated = self._get_cached_xlog_location()
         if last_updated is not None and last_updated + self._xlog_location_cache_ttl > time.time():
-            if cached_xlog_location is not None:
+            if cached_xlog_location is not None and replaced_xlog_location is not None:
                 data['xlog_location'] = cached_xlog_location
-        else:
+        elif replaced_xlog_location is not None:
             # location cache expired
-            self._set_cached_xlog_location(data['xlog_location'])
+            self._set_cached_xlog_location(replaced_xlog_location)
             replaced_xlog_location = None
         ret = member and pod_labels is not None\
             and all(pod_labels.get(k) == v for k, v in role_labels.items())\
