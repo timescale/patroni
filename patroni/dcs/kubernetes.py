@@ -758,7 +758,7 @@ class Kubernetes(AbstractDCS):
         self._standby_leader_label_value = config.get('standby_leader_label_value', 'master')
         self._tmp_role_label = config.get('tmp_role_label')
         self._ca_certs = os.environ.get('PATRONI_KUBERNETES_CACERT', config.get('cacert')) or SERVICE_CERT_FILENAME
-        self._xlog_location_cache_ttl = parse_int(config.get('xlog_location_cache_ttl', '0'), 's') or 0
+        self._xlog_cache_ttl = 0
         self._cached_xlog_location_modified_timestamp = None
         self._cached_xlog_location = None
         super(Kubernetes, self).__init__({**config, 'namespace': ''}, mpp)
@@ -834,10 +834,14 @@ class Kubernetes(AbstractDCS):
         super(Kubernetes, self).reload_config(config)
         if TYPE_CHECKING:  # pragma: no cover
             assert self._retry.deadline is not None
+
+        # we could be called with only Kubernetes part of the config (module init), or with the whole config
+        # during reload; make sure only kubernetes part of the config is fetched below.
+        kconfig = config.get('kubernetes') or config
         self._api.configure_timeouts(self.loop_wait, self._retry.deadline, self.ttl)
 
         # retriable_http_codes supposed to be either int, list of integers or comma-separated string with integers.
-        retriable_http_codes: Union[str, List[Union[str, int]]] = config.get('retriable_http_codes', [])
+        retriable_http_codes: Union[str, List[Union[str, int]]] = kconfig.get('retriable_http_codes', [])
         if not isinstance(retriable_http_codes, list):
             retriable_http_codes = [c.strip() for c in str(retriable_http_codes).split(',')]
 
@@ -845,6 +849,9 @@ class Kubernetes(AbstractDCS):
             self._api.configure_retriable_http_codes([int(c) for c in retriable_http_codes])
         except Exception as e:
             logger.warning('Invalid value of retriable_http_codes = %s: %r', config['retriable_http_codes'], e)
+
+        # cache xlog location for the member, preventing pod update when xlog location is the only update for the pod
+        self._xlog_cache_ttl = parse_int(kconfig.get('xlog_cache_ttl', '0'), 's') or 0
 
     @staticmethod
     def member(pod: K8sObject) -> Member:
@@ -1334,7 +1341,7 @@ class Kubernetes(AbstractDCS):
 
         replaced_xlog_location: Optional[str] = data.get('xlog_location', None)
         cached_xlog_location, last_updated = self._get_cached_xlog_location()
-        if last_updated is not None and last_updated + self._xlog_location_cache_ttl > time.time():
+        if last_updated is not None and last_updated + self._xlog_cache_ttl > time.time():
             if cached_xlog_location is not None and replaced_xlog_location is not None:
                 data['xlog_location'] = cached_xlog_location
         elif replaced_xlog_location is not None:
