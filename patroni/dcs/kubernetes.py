@@ -852,6 +852,8 @@ class Kubernetes(AbstractDCS):
 
         # cache xlog location for the member, preventing pod update when xlog location is the only update for the pod
         self._xlog_cache_ttl = parse_int(kconfig.get('xlog_cache_ttl', '0'), 's') or 0
+        if self._xlog_cache_ttl is not None:
+            logger.debug("set xlog_cache_ttl to %d", self._xlog_cache_ttl)
 
     @staticmethod
     def member(pod: K8sObject) -> Member:
@@ -1341,7 +1343,8 @@ class Kubernetes(AbstractDCS):
 
         replaced_xlog_location: Optional[str] = data.get('xlog_location', None)
         cached_xlog_location, last_updated = self._get_cached_xlog_location()
-        if last_updated is not None and last_updated + self._xlog_cache_ttl > time.time():
+        now = time.time()
+        if last_updated is not None and last_updated + self._xlog_cache_ttl > now:
             if cached_xlog_location is not None and replaced_xlog_location is not None:
                 data['xlog_location'] = cached_xlog_location
         elif replaced_xlog_location is not None:
@@ -1364,6 +1367,10 @@ class Kubernetes(AbstractDCS):
             ret = self._api.patch_namespaced_pod(self._name, self._namespace, body)
             if ret:
                 self._pods.set(self._name, ret)
+        elif cached_xlog_location != replaced_xlog_location and last_updated is not None:
+            logger.debug("prevented pod update, keeping cached xlog value for up to %d seconds",
+                         (last_updated + self._xlog_cache_ttl - now))
+
         if self._should_create_config_service:
             self._create_config_service()
         return bool(ret)
