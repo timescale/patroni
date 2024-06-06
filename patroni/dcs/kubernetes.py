@@ -1344,13 +1344,14 @@ class Kubernetes(AbstractDCS):
         replaced_xlog_location: Optional[str] = data.get('xlog_location', None)
         cached_xlog_location, last_updated = self._get_cached_xlog_location()
         now = time.time()
+        use_cached_xlog = False
         if last_updated is not None and last_updated + self._xlog_cache_ttl > now:
             if cached_xlog_location is not None and replaced_xlog_location is not None:
                 data['xlog_location'] = cached_xlog_location
+                use_cached_xlog = True
         elif replaced_xlog_location is not None:
             # location cache expired
             self._set_cached_xlog_location(replaced_xlog_location)
-            replaced_xlog_location = None
         ret = member and pod_labels is not None\
             and all(pod_labels.get(k) == v for k, v in role_labels.items())\
             and deep_compare(data, member.data)
@@ -1358,7 +1359,7 @@ class Kubernetes(AbstractDCS):
         if not ret:
             # if we move forward with an update anyway, make sure to write the actual
             # value for the xlog, and not the stale cached value.
-            if replaced_xlog_location is not None:
+            if use_cached_xlog:
                 self._set_cached_xlog_location(replaced_xlog_location)
                 data['xlog_location'] = replaced_xlog_location
             metadata = {'namespace': self._namespace, 'name': self._name, 'labels': role_labels,
@@ -1367,7 +1368,7 @@ class Kubernetes(AbstractDCS):
             ret = self._api.patch_namespaced_pod(self._name, self._namespace, body)
             if ret:
                 self._pods.set(self._name, ret)
-        elif cached_xlog_location != replaced_xlog_location and last_updated is not None:
+        elif use_cached_xlog and cached_xlog_location != replaced_xlog_location:
             logger.debug("prevented pod update, keeping cached xlog value for up to %d seconds",
                          (last_updated + self._xlog_cache_ttl - now))
 
