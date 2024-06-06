@@ -852,7 +852,7 @@ class Kubernetes(AbstractDCS):
 
         # cache xlog location for the member, preventing pod update when xlog location is the only update for the pod
         self._xlog_cache_ttl = parse_int(kconfig.get('xlog_cache_ttl', '0'), 's') or 0
-        if self._xlog_cache_ttl is not None:
+        if self._xlog_cache_ttl > 0:
             logger.debug("set xlog_cache_ttl to %d", self._xlog_cache_ttl)
 
     @staticmethod
