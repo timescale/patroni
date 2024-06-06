@@ -1359,7 +1359,7 @@ class Kubernetes(AbstractDCS):
         if not ret:
             # if we move forward with an update anyway, make sure to write the actual
             # value for the xlog, and not the stale cached value.
-            if use_cached_xlog:
+            if use_cached_xlog and replaced_xlog_location is not None:
                 self._set_cached_xlog_location(replaced_xlog_location)
                 data['xlog_location'] = replaced_xlog_location
             metadata = {'namespace': self._namespace, 'name': self._name, 'labels': role_labels,
@@ -1368,7 +1368,7 @@ class Kubernetes(AbstractDCS):
             ret = self._api.patch_namespaced_pod(self._name, self._namespace, body)
             if ret:
                 self._pods.set(self._name, ret)
-        elif use_cached_xlog and cached_xlog_location != replaced_xlog_location:
+        elif use_cached_xlog and cached_xlog_location != replaced_xlog_location and last_updated is not None:
             logger.debug("prevented pod update, keeping cached xlog value for up to %d seconds",
                          (last_updated + self._xlog_cache_ttl - now))
 
