@@ -1314,12 +1314,12 @@ class Kubernetes(AbstractDCS):
     def set_config_value(self, value: str, version: Optional[str] = None) -> bool:
         return self.patch_or_create_config({self._CONFIG: value}, version, bool(self._config_resource_version), False)
 
-    def _get_cached_xlog_location(self) -> Tuple[Optional[str], Optional[float]]:
+    def _get_cached_xlog_location(self) -> Tuple[Optional[str], Optional[int]]:
         return self._cached_xlog_location, self._cached_xlog_location_modified_timestamp
 
     def _set_cached_xlog_location(self, location: str) -> None:
         self._cached_xlog_location = location
-        self._cached_xlog_location_modified_timestamp = time.time()
+        self._cached_xlog_location_modified_timestamp = int(time.time())
 
     @catch_kubernetes_errors
     def touch_member(self, data: Dict[str, Any]) -> bool:
@@ -1343,7 +1343,7 @@ class Kubernetes(AbstractDCS):
 
         replaced_xlog_location: Optional[str] = data.get('xlog_location', None)
         cached_xlog_location, last_updated = self._get_cached_xlog_location()
-        now = time.time()
+        now = int(time.time())
         use_cached_xlog = False
         if last_updated is not None and last_updated + self._xlog_cache_ttl > now:
             if cached_xlog_location is not None and replaced_xlog_location is not None:
