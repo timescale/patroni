@@ -710,7 +710,7 @@ class TestCtl(unittest.TestCase):
     @patch('patroni.ctl.request_patroni')
     def test_version(self, mock_request):
         result = self.runner.invoke(ctl, ['version'])
-        assert 'patronictl version' in result.output
+        assert 'patronictl (timescale fork) version' in result.output
         mock_request.return_value.data = b'{"patroni":{"version":"1.2.3"},"server_version": 100001}'
         result = self.runner.invoke(ctl, ['version', 'dummy'])
         assert '1.2.3' in result.output

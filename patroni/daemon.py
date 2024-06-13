@@ -27,7 +27,7 @@ def get_base_arg_parser() -> argparse.ArgumentParser:
     from .version import __version__
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--version', action='version', version='%(prog)s {0}'.format(__version__))
+    parser.add_argument('--version', action='version', version='%(prog)s (timescale fork) {0}'.format(__version__))
     parser.add_argument('configfile', nargs='?', default='',
                         help='Patroni may also read the configuration from the {0} environment variable'
                         .format(Config.PATRONI_CONFIG_VARIABLE))
