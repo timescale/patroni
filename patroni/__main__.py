@@ -76,6 +76,8 @@ class Patroni(AbstractPatroniDaemon, Tags):
         self.next_run = time.time()
         self.scheduled_restart: Dict[str, Any] = {}
 
+        self._last_cycle_info = ""
+
     def load_dynamic_configuration(self) -> None:
         """Load Patroni dynamic configuration.
 
@@ -198,7 +200,15 @@ class Patroni(AbstractPatroniDaemon, Tags):
         the change and cache the new dynamic configuration values in ``patroni.dynamic.json`` file under Postgres data
         directory.
         """
-        logger.info(self.ha.run_cycle())
+
+        info: str = self.ha.run_cycle()
+        # if we report no action, show this message as INFO only when emitted for the first time
+        # demote it to DEBUG afterwards as long as it repeats
+        log_ha_action = logger.info
+        if info.startswith('no action.') or info.startswith('PAUSE: no action.') and self._last_cycle_info == info:
+            log_ha_action = logger.debug
+
+        log_ha_action(info)
 
         if self.dcs.cluster and self.dcs.cluster.config and self.dcs.cluster.config.data \
                 and self.config.set_dynamic_configuration(self.dcs.cluster.config):
