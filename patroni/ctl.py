@@ -2163,7 +2163,7 @@ def version(cluster_name: str, group: Optional[int], member_names: List[str]) ->
     :param group: filter which Citus group we should get members from. Refer to the module note for more details.
     :param member_names: filter which members we should get version information from.
     """
-    click.echo("patronictl version {0}".format(__version__))
+    click.echo("patronictl (timescale fork) version {0}".format(__version__))
 
     if not cluster_name:
         return
@@ -2179,7 +2179,7 @@ def version(cluster_name: str, group: Optional[int], member_names: List[str]) ->
                     version = data.get('patroni', {}).get('version')
                     pg_version = data.get('server_version')
                     pg_version_str = " PostgreSQL {0}".format(format_pg_version(pg_version)) if pg_version else ""
-                    click.echo("{0}: Patroni {1}{2}".format(m.name, version, pg_version_str))
+                    click.echo("{0}: Patroni (timescale fork) {1}{2}".format(m.name, version, pg_version_str))
                 except Exception as e:
                     click.echo("{0}: failed to get version: {1}".format(m.name, e))
 

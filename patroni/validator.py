@@ -1135,6 +1135,7 @@ schema = Schema({
             Optional("ports"): [{"name": str, "port": IntValidator(max=65535, expected_type=int, raise_assert=True)}],
             Optional("cacert"): str,
             Optional("retriable_http_codes"): Or(int, [int]),
+            Optional('xlog_cache_ttl'): IntValidator(min=0, max=3600, base_unit='s', raise_assert=True)
         },
     }),
     Optional("citus"): {
