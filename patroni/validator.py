@@ -1140,6 +1140,7 @@ schema = Schema({
             Optional("cacert"): str,
             Optional("retriable_http_codes"): Or(int, [int]),
             Optional("bootstrap_labels"): dict,
+            Optional('xlog_cache_ttl'): IntValidator(min=0, max=3600, base_unit='s', raise_assert=True)
         },
     }),
     Optional("citus"): {

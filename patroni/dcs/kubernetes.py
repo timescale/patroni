@@ -25,8 +25,8 @@ from ..collections import EMPTY_DICT
 from ..exceptions import DCSError
 from ..postgresql.misc import PostgresqlRole, PostgresqlState
 from ..postgresql.mpp import AbstractMPP
-from ..utils import deep_compare, iter_response_objects, \
-    keepalive_socket_options, Retry, RetryFailedError, tzutc, uri, USER_AGENT
+from ..utils import deep_compare, iter_response_objects, keepalive_socket_options, \
+    parse_int, Retry, RetryFailedError, tzutc, uri, USER_AGENT
 from . import AbstractDCS, Cluster, ClusterConfig, Failover, Leader, Member, Status, SyncState, TimelineHistory
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -764,6 +764,9 @@ class Kubernetes(AbstractDCS):
         self._bootstrap_labels: Dict[str, str] = {str(k): str(v)
                                                   for k, v in (config.get('bootstrap_labels') or EMPTY_DICT).items()}
         self._ca_certs = os.environ.get('PATRONI_KUBERNETES_CACERT', config.get('cacert')) or SERVICE_CERT_FILENAME
+        self._xlog_cache_ttl = 0
+        self._cached_xlog_location_modified_timestamp = None
+        self._cached_xlog_location = None
         super(Kubernetes, self).__init__({**config, 'namespace': ''}, mpp)
         if self._mpp.is_enabled():
             self._labels[self._mpp.k8s_group_label] = str(self._mpp.group)
@@ -837,10 +840,14 @@ class Kubernetes(AbstractDCS):
         super(Kubernetes, self).reload_config(config)
         if TYPE_CHECKING:  # pragma: no cover
             assert self._retry.deadline is not None
+
+        # we could be called with only Kubernetes part of the config (module init), or with the whole config
+        # during reload; make sure only kubernetes part of the config is fetched below.
+        kconfig = config.get('kubernetes') or config
         self._api.configure_timeouts(self.loop_wait, self._retry.deadline, self.ttl)
 
         # retriable_http_codes supposed to be either int, list of integers or comma-separated string with integers.
-        retriable_http_codes: Union[str, List[Union[str, int]]] = config.get('retriable_http_codes', [])
+        retriable_http_codes: Union[str, List[Union[str, int]]] = kconfig.get('retriable_http_codes', [])
         if not isinstance(retriable_http_codes, list):
             retriable_http_codes = [c.strip() for c in str(retriable_http_codes).split(',')]
 
@@ -848,6 +855,11 @@ class Kubernetes(AbstractDCS):
             self._api.configure_retriable_http_codes([int(c) for c in retriable_http_codes])
         except Exception as e:
             logger.warning('Invalid value of retriable_http_codes = %s: %r', config['retriable_http_codes'], e)
+
+        # cache xlog location for the member, preventing pod update when xlog location is the only update for the pod
+        self._xlog_cache_ttl = parse_int(kconfig.get('xlog_cache_ttl', '0'), 's') or 0
+        if self._xlog_cache_ttl > 0:
+            logger.debug("set xlog_cache_ttl to %d", self._xlog_cache_ttl)
 
     @staticmethod
     def member(pod: K8sObject) -> Member:
@@ -1356,6 +1368,13 @@ class Kubernetes(AbstractDCS):
     def set_config_value(self, value: str, version: Optional[str] = None) -> bool:
         return self.patch_or_create_config({self._CONFIG: value}, version, bool(self._config_resource_version), False)
 
+    def _get_cached_xlog_location(self) -> Tuple[Optional[str], Optional[int]]:
+        return self._cached_xlog_location, self._cached_xlog_location_modified_timestamp
+
+    def _set_cached_xlog_location(self, location: str) -> None:
+        self._cached_xlog_location = location
+        self._cached_xlog_location_modified_timestamp = int(time.time())
+
     @catch_kubernetes_errors
     def touch_member(self, data: Dict[str, Any]) -> bool:
         cluster = self.cluster
@@ -1383,17 +1402,38 @@ class Kubernetes(AbstractDCS):
 
         member = cluster and cluster.get_member(self._name, fallback_to_leader=False)
         pod_labels = member and member.data.pop('pod_labels', None)
+
+        replaced_xlog_location: Optional[str] = data.get('xlog_location', None)
+        cached_xlog_location, last_updated = self._get_cached_xlog_location()
+        now = int(time.time())
+        use_cached_xlog = False
+        if last_updated is not None and last_updated + self._xlog_cache_ttl > now:
+            if cached_xlog_location is not None and replaced_xlog_location is not None:
+                data['xlog_location'] = cached_xlog_location
+                use_cached_xlog = True
+        elif replaced_xlog_location is not None:
+            # location cache expired
+            self._set_cached_xlog_location(replaced_xlog_location)
         ret = member and pod_labels is not None\
             and all(pod_labels.get(k) == v for k, v in updated_labels.items())\
             and deep_compare(data, member.data)
 
         if not ret:
+            # if we move forward with an update anyway, make sure to write the actual
+            # value for the xlog, and not the stale cached value.
+            if use_cached_xlog and replaced_xlog_location is not None:
+                self._set_cached_xlog_location(replaced_xlog_location)
+                data['xlog_location'] = replaced_xlog_location
             metadata: Dict[str, Any] = {'namespace': self._namespace, 'name': self._name, 'labels': updated_labels,
                                         'annotations': {'status': json.dumps(data, separators=(',', ':'))}}
             body = k8s_client.V1Pod(metadata=k8s_client.V1ObjectMeta(**metadata))
             ret = self._api.patch_namespaced_pod(self._name, self._namespace, body)
             if ret:
                 self._pods.set(self._name, ret)
+        elif use_cached_xlog and cached_xlog_location != replaced_xlog_location and last_updated is not None:
+            logger.debug("prevented pod update, keeping cached xlog value for up to %d seconds",
+                         (last_updated + self._xlog_cache_ttl - now))
+
         if self._should_create_config_service:
             self._create_config_service()
         return bool(ret)
