@@ -45,6 +45,14 @@ class Rewind(object):
         return bool(self._postgresql.config.get('use_pg_rewind'))
 
     @property
+    def enable_progress_logging(self) -> bool:
+        return bool(self._postgresql.config.get('pg_rewind_log_progress'))
+
+    @property
+    def enable_debug_logging(self) -> bool:
+        return bool(self._postgresql.config.get('pg_rewind_log_debug'))
+
+    @property
     def can_rewind(self) -> bool:
         """ check if pg_rewind executable is there and that pg_controldata indicates
             we have either wal_log_hints or checksums turned on
@@ -445,6 +453,12 @@ class Rewind(object):
             if self._postgresql.major_version >= 150000 and\
                     self._postgresql.config.config_dir != self._postgresql.data_dir:
                 cmd.append('--config-file={0}'.format(self._postgresql.config.postgresql_conf))
+
+        if self.enable_progress_logging:
+            cmd.append('--progress')
+
+        if self.enable_debug_logging:
+            cmd.append('--debug')
 
         cmd.extend(['-D', self._postgresql.data_dir, '--source-server', dsn])
 
