@@ -542,8 +542,10 @@ class RestApiHandler(BaseHTTPRequestHandler):
         Write an HTTP response with JSON content based on the output of :func:`~patroni.utils.cluster_as_json`, with
         HTTP status ``200`` and the JSON representation of the cluster topology.
         """
+        live_requested = parse_bool(self.path_query.get('live', [None])[0]) or False
+        if live_requested:
+            logger.debug("/cluster requested with live view (future behavior not yet enabled)")
         cluster = self.server.patroni.dcs.get_cluster()
-
         response = cluster_as_json(cluster)
         response['scope'] = self.server.patroni.postgresql.scope
         self._write_json_response(200, response)
