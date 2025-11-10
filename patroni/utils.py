@@ -25,7 +25,7 @@ import time
 from collections import OrderedDict
 from json import JSONDecoder
 from shlex import split
-from typing import Any, Callable, cast, Dict, Iterator, List, Optional, Tuple, Type, TYPE_CHECKING, Union
+from typing import Any, Callable, cast, Dict, Iterator, List, NamedTuple, Optional, Tuple, Type, TYPE_CHECKING, Union
 
 from dateutil import tz
 from urllib3.response import HTTPResponse
@@ -46,6 +46,14 @@ DEC_RE = re.compile(r'^[-+]?(0|[1-9][0-9]*)')
 HEX_RE = re.compile(r'^[-+]?0x[0-9a-fA-F]+')
 DBL_RE = re.compile(r'^[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?')
 WHITESPACE_RE = re.compile(r'[ \t\n\r]*', re.VERBOSE | re.MULTILINE | re.DOTALL)
+
+
+class LiveMemberLSNs(NamedTuple):
+    """Container for live WAL metrics collected outside of the DCS."""
+
+    lsn: Optional[int] = None
+    receive_lsn: Optional[int] = None
+    replay_lsn: Optional[int] = None
 
 
 def get_conversion_table(base_unit: str) -> Dict[str, Dict[str, Union[int, float]]]:
@@ -910,10 +918,13 @@ def iter_response_objects(response: HTTPResponse) -> Iterator[Dict[str, Any]]:
         prev = chunk[idx:]
 
 
-def cluster_as_json(cluster: 'Cluster') -> Dict[str, Any]:
+def cluster_as_json(cluster: 'Cluster', live_status: Optional[Dict[str, LiveMemberLSNs]] = None) -> Dict[str, Any]:
     """Get a JSON representation of *cluster*.
 
     :param cluster: the :class:`~patroni.dcs.Cluster` object to be parsed as JSON.
+    :param live_status: optional mapping of member names to live replication metrics (``lsn``, ``receive_lsn``,
+        ``replay_lsn``) gathered outside of the DCS. When provided, these values override the corresponding DCS
+        properties when rendering replica lag information.
 
     :returns: JSON representation of *cluster*.
 
@@ -953,6 +964,7 @@ def cluster_as_json(cluster: 'Cluster') -> Dict[str, Any]:
     config = global_config.from_cluster(cluster)
     leader_name = cluster.leader.name if cluster.leader else None
     cluster_lsn = cluster.status.last_lsn
+    live_status = live_status or {}
 
     ret: Dict[str, Any] = {'members': []}
     sync_role = 'quorum_standby' if config.is_quorum_commit_mode else 'sync_standby'
@@ -978,7 +990,9 @@ def cluster_as_json(cluster: 'Cluster') -> Dict[str, Any]:
             for location in ('receive_', 'replay_', ''):
                 lsn_type, lag_type = f'{location}lsn', f'{location}lag'
 
-                lsn = getattr(m, lsn_type)
+                live_entry = live_status.get(m.name)
+                live_lsn = getattr(live_entry, lsn_type) if live_entry else None
+                lsn = live_lsn if live_lsn is not None else getattr(m, lsn_type)
                 if not lsn:
                     member[lsn_type] = member[lag_type] = 'unknown'
                 elif cluster_lsn >= lsn:
