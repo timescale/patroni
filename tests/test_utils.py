@@ -188,3 +188,10 @@ class TestClusterAsJson(unittest.TestCase):
         self.assertEqual(replica['lag'], cluster.status.last_lsn - 8)
         self.assertEqual(replica['receive_lsn'], format_lsn(7))
         self.assertEqual(replica['receive_lag'], cluster.status.last_lsn - 7)
+        self.assertEqual(replica['lsn_source'], 'live')
+
+    def test_dcs_sources_when_no_live(self):
+        cluster, replica_name = self._cluster_with_replica_metrics()
+        response = cluster_as_json(cluster)
+        replica = next(m for m in response['members'] if m['name'] == replica_name)
+        self.assertEqual(replica['lsn_source'], 'dcs')

@@ -14,13 +14,13 @@ from patroni.dcs import ClusterConfig, Member
 from patroni.exceptions import PostgresConnectionException
 from patroni.ha import _MemberStatus
 from patroni.postgresql.config import get_param_diff
-from patroni.postgresql.misc import PostgresqlRole, PostgresqlState
+from patroni.postgresql.misc import PostgresqlRole, PostgresqlState, format_lsn
 from patroni.psycopg import OperationalError
 from patroni.utils import LiveMemberLSNs, RetryFailedError, tzutc
 
 from . import MockConnect, psycopg_connect
 from .test_etcd import socket_getaddrinfo
-from .test_ha import get_cluster_initialized_without_leader
+from .test_ha import get_cluster_initialized_without_leader, get_cluster_initialized_with_only_leader
 
 future_restart_time = datetime.datetime.now(tzutc) + datetime.timedelta(days=5)
 postmaster_start_time = datetime.datetime.now(tzutc)
@@ -401,8 +401,13 @@ class TestRestApiHandler(unittest.TestCase):
     def test_do_GET_cluster(self, mock_dcs):
         mock_dcs.get_cluster.return_value = get_cluster_initialized_without_leader()
         mock_dcs.get_cluster.return_value.members[1].data['xlog_location'] = 11
-        self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /cluster'))
-        self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /cluster?live=1'))
+        with patch.object(RestApiHandler, 'get_live_member_lsns') as live_mock, \
+                patch.object(RestApiHandler, '_write_json_response') as responder:
+            self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /cluster'))
+            live_mock.assert_not_called()
+        payload = responder.call_args[0][1]
+        replica = next(m for m in payload['members'] if m['role'] == 'replica')
+        self.assertEqual(replica['lsn_source'], 'dcs')
 
     def _make_handler(self):
         handler = RestApiHandler.__new__(RestApiHandler)  # type: ignore
@@ -433,7 +438,7 @@ class TestRestApiHandler(unittest.TestCase):
         with patch.object(handler.server.patroni.ha, 'fetch_nodes_statuses', Mock(return_value=[status])):
             with patch.object(handler.server.patroni.postgresql, 'name', cluster.leader.name):
                 live_map = handler.get_live_member_lsns(cluster)
-        self.assertEqual(live_map[remote.name], LiveMemberLSNs())
+        self.assertNotIn(remote.name, live_map)
 
     def test_get_live_member_lsns_local_failure(self):
         handler = self._make_handler()
@@ -459,10 +464,41 @@ class TestRestApiHandler(unittest.TestCase):
         status = handler._status_to_live_lsn({})
         self.assertEqual(status, LiveMemberLSNs())
 
+    def test_status_to_live_lsn_replay_fallback(self):
+        handler = self._make_handler()
+        status = handler._status_to_live_lsn({'xlog': {'replayed_location': 123, 'received_location': 120}})
+        self.assertEqual(status.lsn, 123)
+        self.assertEqual(status.replay_lsn, 123)
+        self.assertEqual(status.receive_lsn, 120)
     @patch.object(MockPatroni, 'dcs')
     def test_do_GET_history(self, mock_dcs):
         mock_dcs.cluster = get_cluster_initialized_without_leader()
         self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /history'))
+
+    @patch.object(MockPatroni, 'dcs')
+    def test_do_GET_cluster_live_skips_single_member(self, mock_dcs):
+        mock_dcs.get_cluster.return_value = get_cluster_initialized_with_only_leader()
+        with patch.object(RestApiHandler, 'get_live_member_lsns') as live_mock, \
+                patch.object(RestApiHandler, '_write_json_response') as responder:
+            MockRestApiServer(RestApiHandler, 'GET /cluster?live=1')
+        live_mock.assert_not_called()
+        payload = responder.call_args[0][1]
+        self.assertNotIn('lag_source', payload)
+
+    @patch.object(MockPatroni, 'dcs')
+    def test_do_GET_cluster_live_uses_helper(self, mock_dcs):
+        cluster = get_cluster_initialized_without_leader(leader=True)
+        mock_dcs.get_cluster.return_value = cluster
+        live_map = {'other': LiveMemberLSNs(lsn=20, receive_lsn=18, replay_lsn=16)}
+        live_mock = Mock(return_value=live_map)
+        with patch.object(RestApiHandler, 'get_live_member_lsns', live_mock), \
+                patch.object(RestApiHandler, '_write_json_response') as responder:
+            MockRestApiServer(RestApiHandler, 'GET /cluster?live=1')
+        live_mock.assert_called_once()
+        payload = responder.call_args[0][1]
+        replica = next(m for m in payload['members'] if m['name'] == 'other')
+        self.assertEqual(replica['lsn'], format_lsn(20))
+        self.assertEqual(replica['lsn_source'], 'live')
 
     @patch.object(MockPatroni, 'dcs')
     def test_do_GET_config(self, mock_dcs):

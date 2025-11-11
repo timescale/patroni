@@ -543,19 +543,24 @@ class RestApiHandler(BaseHTTPRequestHandler):
         HTTP status ``200`` and the JSON representation of the cluster topology.
         """
         live_requested = parse_bool(self.path_query.get('live', [None])[0]) or False
-        if live_requested:
-            logger.debug("/cluster requested with live view (future behavior not yet enabled)")
         cluster = self.server.patroni.dcs.get_cluster()
-        response = cluster_as_json(cluster)
+        live_map: Optional[Dict[str, LiveMemberLSNs]] = None
+        if live_requested:
+            if len(cluster.members) > 1:
+                live_map = self.get_live_member_lsns(cluster)
+            else:
+                logger.debug("/cluster live view skipped: single-member cluster")
+
+        response = cluster_as_json(cluster, live_map)
         response['scope'] = self.server.patroni.postgresql.scope
         self._write_json_response(200, response)
 
     @staticmethod
     def _status_to_live_lsn(status: Dict[str, Any]) -> LiveMemberLSNs:
         wal = status.get('wal') or status.get('xlog') or {}
-        location = parse_int(wal.get('location'))
         receive = parse_int(wal.get('received_location'))
         replay = parse_int(wal.get('replayed_location'))
+        location = parse_int(wal.get('location')) or replay or receive
         return LiveMemberLSNs(location, receive, replay)
 
     def get_live_member_lsns(self, cluster: Cluster) -> Dict[str, LiveMemberLSNs]:
@@ -564,7 +569,9 @@ class RestApiHandler(BaseHTTPRequestHandler):
         local_name = self.server.patroni.postgresql.name
 
         try:
-            live_map[local_name] = self._status_to_live_lsn(self.get_postgresql_status(True))
+            local_status = self._status_to_live_lsn(self.get_postgresql_status(True))
+            if any((local_status.lsn, local_status.receive_lsn, local_status.replay_lsn)):
+                live_map[local_name] = local_status
         except Exception as e:  # pragma: no cover - defensive, tested via mocks
             logger.debug("Failed to collect local live status: %s", e)
 
@@ -583,9 +590,9 @@ class RestApiHandler(BaseHTTPRequestHandler):
             if not member_name:
                 continue
             if status.reachable and status.data:
-                live_map[member_name] = self._status_to_live_lsn(status.data)
-            else:
-                live_map.setdefault(member_name, LiveMemberLSNs())
+                converted = self._status_to_live_lsn(status.data)
+                if any((converted.lsn, converted.receive_lsn, converted.replay_lsn)):
+                    live_map[member_name] = converted
         return live_map
 
     def do_GET_history(self) -> None:

@@ -950,6 +950,7 @@ def cluster_as_json(cluster: 'Cluster', live_status: Optional[Dict[str, LiveMemb
             * ``lag``: replication lag for ``lsn``, if applicable;
             * ``receive_lag``: lag of the receive LSN;
             * ``replay_lag``: lag of the replay LSN;
+            * ``lsn_source``: ``live`` if LSN values were derived from a live poll, else ``dcs``;
 
         * ``pause``: ``True`` if cluster is in maintenance mode;
         * ``scheduled_switchover``: if a switchover has been scheduled, then it contains this entry with these keys:
@@ -969,6 +970,7 @@ def cluster_as_json(cluster: 'Cluster', live_status: Optional[Dict[str, LiveMemb
     ret: Dict[str, Any] = {'members': []}
     sync_role = 'quorum_standby' if config.is_quorum_commit_mode else 'sync_standby'
     for m in cluster.members:
+        live_entry = live_status.get(m.name)
         if m.name == leader_name:
             role = 'standby_leader' if config.is_standby_cluster else 'leader'
         elif config.is_synchronous_mode and cluster.sync.matches(m.name):
@@ -987,12 +989,14 @@ def cluster_as_json(cluster: 'Cluster', live_status: Optional[Dict[str, LiveMemb
         member.update({n: m.data[n] for n in optional_attributes if n in m.data})
 
         if m.name != leader_name:
+            member['lsn_source'] = 'live' if live_entry else 'dcs'
             for location in ('receive_', 'replay_', ''):
                 lsn_type, lag_type = f'{location}lsn', f'{location}lag'
 
-                live_entry = live_status.get(m.name)
-                live_lsn = getattr(live_entry, lsn_type) if live_entry else None
-                lsn = live_lsn if live_lsn is not None else getattr(m, lsn_type)
+                if live_entry:
+                    lsn = getattr(live_entry, lsn_type)
+                else:
+                    lsn = getattr(m, lsn_type)
                 if not lsn:
                     member[lsn_type] = member[lag_type] = 'unknown'
                 elif cluster_lsn >= lsn:
