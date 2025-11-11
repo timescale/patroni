@@ -65,10 +65,10 @@ from . import global_config
 from .config import Config
 from .dcs import AbstractDCS, Cluster, get_dcs as _get_dcs, Leader, Member
 from .exceptions import PatroniException
-from .postgresql.misc import postgres_version_to_int, PostgresqlRole, PostgresqlState
+from .postgresql.misc import parse_lsn, postgres_version_to_int, PostgresqlRole, PostgresqlState
 from .postgresql.mpp import get_mpp
 from .request import PatroniRequest
-from .utils import cluster_as_json, patch_config, polling_loop
+from .utils import LiveMemberLSNs, cluster_as_json, patch_config, polling_loop
 from .version import __version__
 
 CONFIG_DIR_PATH = click.get_app_dir('patroni')
@@ -417,6 +417,46 @@ def request_patroni(member: Member, method: str = 'GET',
     if not request_executor:
         request_executor = ctx.obj['__request_patroni'] = PatroniRequest(_get_configuration())
     return request_executor(member, method, endpoint, data)
+
+
+def _parse_lsn_value(value: Any) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if not value or value.lower() == 'unknown':
+            return None
+        try:
+            return parse_lsn(value)
+        except Exception:
+            logging.debug('Failed to parse LSN value "%s"', value)
+    return None
+
+
+def fetch_live_status(cluster: Cluster, live_requested: bool) -> Optional[Dict[str, LiveMemberLSNs]]:
+    if not live_requested:
+        return None
+    for member in get_all_members_leader_first(cluster):
+        try:
+            response = request_patroni(member, endpoint='cluster?live=1')
+            if getattr(response, 'status', 0) >= 400:
+                logging.debug('Live /cluster request to %s returned status %s',
+                              member.name, getattr(response, 'status', None))
+                continue
+            payload = json.loads(response.data.decode('utf-8'))
+            live_map: Dict[str, LiveMemberLSNs] = {}
+            for entry in payload.get('members', []):
+                metrics = LiveMemberLSNs(
+                    _parse_lsn_value(entry.get('lsn')),
+                    _parse_lsn_value(entry.get('receive_lsn')),
+                    _parse_lsn_value(entry.get('replay_lsn')))
+                if any((metrics.lsn, metrics.receive_lsn, metrics.replay_lsn)):
+                    live_map[entry.get('name')] = metrics
+            if live_map:
+                return live_map
+        except Exception as e:
+            logging.debug('Failed to fetch live /cluster view from %s: %s', member.name, e)
+    return None
 
 
 def print_output(columns: Optional[List[str]], rows: List[List[Any]], alignment: Optional[Dict[str, str]] = None,
@@ -1561,7 +1601,8 @@ def get_cluster_service_info(cluster: Dict[str, Any]) -> List[str]:
 
 
 def output_members(cluster: Cluster, name: str, extended: bool = False,
-                   fmt: str = 'pretty', group: Optional[int] = None) -> None:
+                   fmt: str = 'pretty', group: Optional[int] = None,
+                   live_status: Optional[Dict[str, LiveMemberLSNs]] = None) -> None:
     """Print information about the Patroni cluster and its members.
 
     Information is printed to console through :func:`print_output`, and contains:
@@ -1594,6 +1635,7 @@ def output_members(cluster: Cluster, name: str, extended: bool = False,
         ``topology`` nor ``pretty``, then complementary information gathered through :func:`get_cluster_service_info` is
         not printed.
     :param group: filter which Citus group we should get members from. If ``None`` get from all groups.
+    :param live_status: optional mapping of member names to live LSN metrics gathered via the REST API.
     """
     rows: List[List[Any]] = []
     logging.debug(cluster)
@@ -1602,7 +1644,7 @@ def output_members(cluster: Cluster, name: str, extended: bool = False,
     columns = ['Cluster', 'Member', 'Host', 'Role', 'State', 'TL',
                'Receive LSN', 'Receive Lag', 'Replay LSN', 'Replay Lag']
 
-    clusters = {group or 0: cluster_as_json(cluster)}
+    clusters = {group or 0: cluster_as_json(cluster, live_status)}
 
     if is_citus_cluster():
         columns.insert(1, 'Group')
@@ -1730,9 +1772,9 @@ def members(ctx: click.Context, cluster_names: List[str], group: Optional[int], 
 
         for cluster_name in cluster_names:
             dcs = get_dcs(cluster_name, group)
-
             cluster = dcs.get_cluster()
-            output_members(cluster, cluster_name, extended, fmt, group)
+            live_status = fetch_live_status(cluster, ctx.obj.get('__list_live', False))
+            output_members(cluster, cluster_name, extended, fmt, group, live_status=live_status)
 
 
 @ctl.command('topology', help='Prints ASCII topology for given cluster')

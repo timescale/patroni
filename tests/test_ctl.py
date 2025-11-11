@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 
@@ -542,6 +543,18 @@ class TestCtl(unittest.TestCase):
             result = self.runner.invoke(ctl, ['list', '--live'])
         self.assertEqual(result.exit_code, 0)
         self.assertTrue(captured and all(captured))
+
+    def test_list_live_fetches_rest(self):
+        payload = {'members': [{'name': 'other', 'lsn': '0/10', 'receive_lsn': '0/8', 'replay_lsn': '0/8'}]}
+        response = Mock(status=200, data=json.dumps(payload).encode('utf-8'))
+        with patch('patroni.ctl.request_patroni', Mock(return_value=response)) as req, \
+                patch('patroni.ctl.output_members') as output:
+            result = self.runner.invoke(ctl, ['list', '--live'])
+        self.assertEqual(result.exit_code, 0)
+        req.assert_called()
+        _, kwargs = output.call_args
+        self.assertIn('live_status', kwargs)
+        self.assertTrue(kwargs['live_status'])
 
     def test_list_standby_cluster(self):
         cluster = get_cluster_initialized_without_leader(leader=True, sync=('leader', 'other'))
