@@ -1693,11 +1693,14 @@ def output_members(cluster: Cluster, name: str, extended: bool = False,
 @option_citus_group
 @click.option('--extended', '-e', help='Show some extra information', is_flag=True)
 @click.option('--timestamp', '-t', 'ts', help='Print timestamp', is_flag=True)
+@click.option('--live', is_flag=True,
+              help='Ask Patroni REST API for live replica LSN data (falls back to DCS if unavailable)')
 @option_format
 @option_watch
 @option_watchrefresh
-def members(cluster_names: List[str], group: Optional[int], fmt: str,
-            watch: Optional[int], w: bool, extended: bool, ts: bool) -> None:
+@click.pass_context
+def members(ctx: click.Context, cluster_names: List[str], group: Optional[int], fmt: str,
+            watch: Optional[int], w: bool, extended: bool, ts: bool, live: bool) -> None:
     """Process ``list`` command of ``patronictl`` utility.
 
     Print information about the Patroni cluster through :func:`output_members`.
@@ -1711,7 +1714,9 @@ def members(cluster_names: List[str], group: Optional[int], fmt: str,
     :param extended: if extended information should be printed. See ``extended`` argument of :func:`output_members` for
         more details.
     :param ts: if timestamp should be included in the output.
+    :param live: if ``True`` prefer live LSN data from the REST API when available.
     """
+    ctx.obj['__list_live'] = live
     config = _get_configuration()
     if not cluster_names:
         if 'scope' in config:

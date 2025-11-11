@@ -532,6 +532,17 @@ class TestCtl(unittest.TestCase):
         assert '2100' in result.output
         assert 'Scheduled restart' in result.output
 
+    def test_list_live_flag(self):
+        captured = []
+
+        def _capture(*args, **kwargs):
+            captured.append(click.get_current_context().obj.get('__list_live'))
+
+        with patch('patroni.ctl.output_members', side_effect=_capture):
+            result = self.runner.invoke(ctl, ['list', '--live'])
+        self.assertEqual(result.exit_code, 0)
+        self.assertTrue(captured and all(captured))
+
     def test_list_standby_cluster(self):
         cluster = get_cluster_initialized_without_leader(leader=True, sync=('leader', 'other'))
         cluster.config.data.update(synchronous_mode=True, standby_cluster={'port': 5433})
