@@ -402,7 +402,8 @@ def get_dcs(scope: str, group: Optional[int]) -> AbstractDCS:
 
 
 def request_patroni(member: Member, method: str = 'GET',
-                    endpoint: Optional[str] = None, data: Optional[Any] = None) -> urllib3.response.HTTPResponse:
+                    endpoint: Optional[str] = None, data: Optional[Any] = None,
+                    **kwargs: Any) -> urllib3.response.HTTPResponse:
     """Perform a request to Patroni REST API.
 
     :param member: DCS member, used to get the base URL of its REST API server.
@@ -416,7 +417,7 @@ def request_patroni(member: Member, method: str = 'GET',
     request_executor = ctx.obj.get('__request_patroni')
     if not request_executor:
         request_executor = ctx.obj['__request_patroni'] = PatroniRequest(_get_configuration())
-    return request_executor(member, method, endpoint, data)
+    return request_executor(member, method, endpoint, data, **kwargs)
 
 
 def _parse_lsn_value(value: Any) -> Optional[int]:
@@ -437,6 +438,9 @@ def fetch_live_status(cluster: Cluster, live_requested: bool) -> Optional[Dict[s
     if not live_requested:
         return None
     for member in get_all_members_leader_first(cluster):
+        pool_logger = logging.getLogger('urllib3.connectionpool')
+        prev_level = pool_logger.level
+        pool_logger.setLevel(logging.ERROR)
         try:
             response = request_patroni(member, endpoint='cluster?live=1')
             if getattr(response, 'status', 0) >= 400:
@@ -456,6 +460,8 @@ def fetch_live_status(cluster: Cluster, live_requested: bool) -> Optional[Dict[s
                 return live_map
         except Exception as e:
             logging.debug('Failed to fetch live /cluster view from %s: %s', member.name, e)
+        finally:
+            pool_logger.setLevel(prev_level)
     return None
 
 
@@ -1602,7 +1608,8 @@ def get_cluster_service_info(cluster: Dict[str, Any]) -> List[str]:
 
 def output_members(cluster: Cluster, name: str, extended: bool = False,
                    fmt: str = 'pretty', group: Optional[int] = None,
-                   live_status: Optional[Dict[str, LiveMemberLSNs]] = None) -> None:
+                   live_status: Optional[Dict[str, LiveMemberLSNs]] = None,
+                   live_requested: bool = False) -> None:
     """Print information about the Patroni cluster and its members.
 
     Information is printed to console through :func:`print_output`, and contains:
@@ -1652,10 +1659,13 @@ def output_members(cluster: Cluster, name: str, extended: bool = False,
             clusters.update({g: cluster_as_json(c) for g, c in cluster.workers.items()})
 
     all_members = [m for c in clusters.values() for m in c['members'] if 'host' in m]
+    show_lsn_source = live_requested
 
     for c in ('Pending restart', 'Pending restart reason', 'Scheduled restart', 'Tags'):
         if extended or any(m.get(c.lower().replace(' ', '_')) for m in all_members):
             columns.append(c)
+    if show_lsn_source:
+        columns.append('LSN Source')
 
     # Show Host as 'host:port' if somebody is running on non-standard port or two nodes are running on the same host
     append_port = any('port' in m and m['port'] != 5432 for m in all_members) or\
@@ -1694,6 +1704,8 @@ def output_members(cluster: Cluster, name: str, extended: bool = False,
                           receive_lsn=receive_lsn, replay_lsn=replay_lsn,
                           pending_restart='*' if member.get('pending_restart') else '',
                           pending_restart_reason=restart_reason)
+            if show_lsn_source:
+                member['lsn_source'] = member.get('lsn_source', 'dcs')
 
             if append_port and member['host'] and member.get('port'):
                 member['host'] = ':'.join([member['host'], str(member['port'])])
@@ -1716,8 +1728,10 @@ def output_members(cluster: Cluster, name: str, extended: bool = False,
     title = f' {title}: {name}{title_details} '
     if fmt in ('pretty', 'topology'):
         columns[columns.index('Replay Lag')] = columns[columns.index('Receive Lag')] = 'Lag'
-    print_output(columns, rows,
-                 {'Group': 'r', 'Receive LSN': 'r', 'Replay LSN': 'r', 'Lag': 'r', 'TL': 'r'}, fmt, title)
+    alignment = {'Group': 'r', 'Receive LSN': 'r', 'Replay LSN': 'r', 'Lag': 'r', 'TL': 'r'}
+    if show_lsn_source:
+        alignment['LSN Source'] = 'l'
+    print_output(columns, rows, alignment, fmt, title)
 
     if fmt not in ('pretty', 'topology'):  # Omit service info when using machine-readable formats
         return
@@ -1773,8 +1787,10 @@ def members(ctx: click.Context, cluster_names: List[str], group: Optional[int], 
         for cluster_name in cluster_names:
             dcs = get_dcs(cluster_name, group)
             cluster = dcs.get_cluster()
-            live_status = fetch_live_status(cluster, ctx.obj.get('__list_live', False))
-            output_members(cluster, cluster_name, extended, fmt, group, live_status=live_status)
+            live_flag = ctx.obj.get('__list_live', False)
+            live_status = fetch_live_status(cluster, live_flag)
+            output_members(cluster, cluster_name, extended, fmt, group,
+                           live_status=live_status, live_requested=live_flag)
 
 
 @ctl.command('topology', help='Prints ASCII topology for given cluster')
