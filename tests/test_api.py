@@ -16,7 +16,7 @@ from patroni.ha import _MemberStatus
 from patroni.postgresql.config import get_param_diff
 from patroni.postgresql.misc import PostgresqlRole, PostgresqlState
 from patroni.psycopg import OperationalError
-from patroni.utils import RetryFailedError, tzutc
+from patroni.utils import LiveMemberLSNs, RetryFailedError, tzutc
 
 from . import MockConnect, psycopg_connect
 from .test_etcd import socket_getaddrinfo
@@ -403,6 +403,61 @@ class TestRestApiHandler(unittest.TestCase):
         mock_dcs.get_cluster.return_value.members[1].data['xlog_location'] = 11
         self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /cluster'))
         self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /cluster?live=1'))
+
+    def _make_handler(self):
+        handler = RestApiHandler.__new__(RestApiHandler)  # type: ignore
+        handler.server = Mock()
+        handler.server.patroni = MockPatroni()
+        return handler
+
+    def test_get_live_member_lsns_success(self):
+        handler = self._make_handler()
+        cluster = get_cluster_initialized_without_leader(leader=True)
+        remote = next(m for m in cluster.members if m.name != cluster.leader.name)
+        handler.get_postgresql_status = Mock(return_value={'xlog': {'location': 30}})
+        status = _MemberStatus(remote, True, True, 0, {'xlog': {'received_location': 12, 'replayed_location': 11}})
+        with patch.object(handler.server.patroni.ha, 'fetch_nodes_statuses', Mock(return_value=[status])):
+            with patch.object(handler.server.patroni.postgresql, 'name', cluster.leader.name):
+                live_map = handler.get_live_member_lsns(cluster)
+        self.assertIn(cluster.leader.name, live_map)
+        self.assertEqual(live_map[cluster.leader.name].lsn, 30)
+        self.assertEqual(live_map[remote.name].receive_lsn, 12)
+        self.assertEqual(live_map[remote.name].replay_lsn, 11)
+
+    def test_get_live_member_lsns_timeout(self):
+        handler = self._make_handler()
+        cluster = get_cluster_initialized_without_leader(leader=True)
+        remote = next(m for m in cluster.members if m.name != cluster.leader.name)
+        handler.get_postgresql_status = Mock(return_value={'xlog': {'location': 20}})
+        status = _MemberStatus(remote, False, None, 0, {})
+        with patch.object(handler.server.patroni.ha, 'fetch_nodes_statuses', Mock(return_value=[status])):
+            with patch.object(handler.server.patroni.postgresql, 'name', cluster.leader.name):
+                live_map = handler.get_live_member_lsns(cluster)
+        self.assertEqual(live_map[remote.name], LiveMemberLSNs())
+
+    def test_get_live_member_lsns_local_failure(self):
+        handler = self._make_handler()
+        cluster = get_cluster_initialized_without_leader(leader=True)
+        handler.get_postgresql_status = Mock(side_effect=Exception("boom"))
+        with patch.object(handler.server.patroni.ha, 'fetch_nodes_statuses', Mock(return_value=[])):
+            with patch.object(handler.server.patroni.postgresql, 'name', cluster.leader.name):
+                live_map = handler.get_live_member_lsns(cluster)
+        self.assertNotIn(cluster.leader.name, live_map)
+
+    def test_get_live_member_lsns_fetch_exception(self):
+        handler = self._make_handler()
+        cluster = get_cluster_initialized_without_leader(leader=True)
+        handler.get_postgresql_status = Mock(return_value={'xlog': {'location': 15}})
+        fetch_mock = Mock(side_effect=Exception("network"))
+        with patch.object(handler.server.patroni.ha, 'fetch_nodes_statuses', fetch_mock):
+            with patch.object(handler.server.patroni.postgresql, 'name', cluster.leader.name):
+                live_map = handler.get_live_member_lsns(cluster)
+        self.assertEqual(live_map[cluster.leader.name].lsn, 15)
+
+    def test_status_to_live_lsn_missing_fields(self):
+        handler = self._make_handler()
+        status = handler._status_to_live_lsn({})
+        self.assertEqual(status, LiveMemberLSNs())
 
     @patch.object(MockPatroni, 'dcs')
     def test_do_GET_history(self, mock_dcs):

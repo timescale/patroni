@@ -31,7 +31,7 @@ from .__main__ import Patroni
 from .dcs import Cluster
 from .exceptions import PostgresConnectionException, PostgresException
 from .postgresql.misc import postgres_version_to_int, PostgresqlRole, PostgresqlState
-from .utils import cluster_as_json, deep_compare, enable_keepalive, parse_bool, \
+from .utils import LiveMemberLSNs, cluster_as_json, deep_compare, enable_keepalive, parse_bool, \
     parse_int, patch_config, Retry, RetryFailedError, split_host_port, tzutc, uri
 
 logger = logging.getLogger(__name__)
@@ -549,6 +549,44 @@ class RestApiHandler(BaseHTTPRequestHandler):
         response = cluster_as_json(cluster)
         response['scope'] = self.server.patroni.postgresql.scope
         self._write_json_response(200, response)
+
+    @staticmethod
+    def _status_to_live_lsn(status: Dict[str, Any]) -> LiveMemberLSNs:
+        wal = status.get('wal') or status.get('xlog') or {}
+        location = parse_int(wal.get('location'))
+        receive = parse_int(wal.get('received_location'))
+        replay = parse_int(wal.get('replayed_location'))
+        return LiveMemberLSNs(location, receive, replay)
+
+    def get_live_member_lsns(self, cluster: Cluster) -> Dict[str, LiveMemberLSNs]:
+        """Collect live WAL metrics for local and remote members."""
+        live_map: Dict[str, LiveMemberLSNs] = {}
+        local_name = self.server.patroni.postgresql.name
+
+        try:
+            live_map[local_name] = self._status_to_live_lsn(self.get_postgresql_status(True))
+        except Exception as e:  # pragma: no cover - defensive, tested via mocks
+            logger.debug("Failed to collect local live status: %s", e)
+
+        members = [m for m in cluster.members if m.name != local_name and m.api_url]
+        if not members:
+            return live_map
+
+        try:
+            statuses = self.server.patroni.ha.fetch_nodes_statuses(members)
+        except Exception as e:  # pragma: no cover - defensive; exercised via unit tests
+            logger.debug("Failed to collect remote live statuses: %s", e)
+            return live_map
+
+        for status in statuses:
+            member_name = status.member and status.member.name
+            if not member_name:
+                continue
+            if status.reachable and status.data:
+                live_map[member_name] = self._status_to_live_lsn(status.data)
+            else:
+                live_map.setdefault(member_name, LiveMemberLSNs())
+        return live_map
 
     def do_GET_history(self) -> None:
         """Handle a ``GET`` request to ``/history`` path.
