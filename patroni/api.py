@@ -31,8 +31,8 @@ from .__main__ import Patroni
 from .dcs import Cluster
 from .exceptions import PostgresConnectionException, PostgresException
 from .postgresql.misc import postgres_version_to_int, PostgresqlRole, PostgresqlState
-from .utils import LiveMemberLSNs, cluster_as_json, deep_compare, enable_keepalive, parse_bool, \
-    parse_int, patch_config, Retry, RetryFailedError, split_host_port, tzutc, uri
+from .utils import cluster_as_json, deep_compare, enable_keepalive, LiveMemberLSNs, \
+    parse_bool, parse_int, patch_config, Retry, RetryFailedError, split_host_port, tzutc, uri
 
 logger = logging.getLogger(__name__)
 
@@ -557,7 +557,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _status_to_live_lsn(status: Dict[str, Any]) -> LiveMemberLSNs:
-        wal = status.get('wal') or status.get('xlog') or {}
+        wal: Dict[str, Any] = status.get('wal') or status.get('xlog') or {}
         receive = parse_int(wal.get('received_location'))
         replay = parse_int(wal.get('replayed_location'))
         location = parse_int(wal.get('location')) or replay or receive

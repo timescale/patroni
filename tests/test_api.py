@@ -14,13 +14,13 @@ from patroni.dcs import ClusterConfig, Member
 from patroni.exceptions import PostgresConnectionException
 from patroni.ha import _MemberStatus
 from patroni.postgresql.config import get_param_diff
-from patroni.postgresql.misc import PostgresqlRole, PostgresqlState, format_lsn
+from patroni.postgresql.misc import format_lsn, PostgresqlRole, PostgresqlState
 from patroni.psycopg import OperationalError
 from patroni.utils import LiveMemberLSNs, RetryFailedError, tzutc
 
 from . import MockConnect, psycopg_connect
 from .test_etcd import socket_getaddrinfo
-from .test_ha import get_cluster_initialized_without_leader, get_cluster_initialized_with_only_leader
+from .test_ha import get_cluster_initialized_with_only_leader, get_cluster_initialized_without_leader
 
 future_restart_time = datetime.datetime.now(tzutc) + datetime.timedelta(days=5)
 postmaster_start_time = datetime.datetime.now(tzutc)
@@ -470,6 +470,7 @@ class TestRestApiHandler(unittest.TestCase):
         self.assertEqual(status.lsn, 123)
         self.assertEqual(status.replay_lsn, 123)
         self.assertEqual(status.receive_lsn, 120)
+
     @patch.object(MockPatroni, 'dcs')
     def test_do_GET_history(self, mock_dcs):
         mock_dcs.cluster = get_cluster_initialized_without_leader()

@@ -68,7 +68,7 @@ from .exceptions import PatroniException
 from .postgresql.misc import parse_lsn, postgres_version_to_int, PostgresqlRole, PostgresqlState
 from .postgresql.mpp import get_mpp
 from .request import PatroniRequest
-from .utils import LiveMemberLSNs, cluster_as_json, patch_config, polling_loop
+from .utils import cluster_as_json, LiveMemberLSNs, patch_config, polling_loop
 from .version import __version__
 
 CONFIG_DIR_PATH = click.get_app_dir('patroni')

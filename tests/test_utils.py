@@ -5,8 +5,9 @@ from unittest.mock import Mock, patch
 
 from patroni.exceptions import PatroniException
 from patroni.postgresql.misc import format_lsn
-from patroni.utils import LiveMemberLSNs, apply_keepalive_limit, cluster_as_json, enable_keepalive, get_major_version, \
-    get_postgres_version, polling_loop, Retry, RetryFailedError, unquote, validate_directory
+from patroni.utils import apply_keepalive_limit, cluster_as_json, enable_keepalive, get_major_version, \
+    get_postgres_version, LiveMemberLSNs, polling_loop, Retry, RetryFailedError, unquote, validate_directory
+
 from .test_ha import get_cluster_initialized_without_leader
 
 
