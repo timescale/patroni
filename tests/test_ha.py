@@ -264,6 +264,7 @@ class TestHa(PostgresInit):
         self.ha.dcs.touch_member = true
         self.ha.touch_member()
 
+    @patch('patroni.postgresql.Postgresql.replication_state', Mock(return_value='streaming'))
     @patch.object(Postgresql, 'received_timeline', Mock(return_value=None))
     def test_touch_member_xlog_cache_ttl(self):
         self.ha.patroni.config._Config__effective_configuration['xlog_cache_ttl'] = 60
@@ -287,12 +288,15 @@ class TestHa(PostgresInit):
         self.assertEqual(self.ha.dcs.touch_member.call_count, 1)
         self.assertEqual(self.ha._last_member_data['last_modified'], first_last_modified)
 
-        self.ha._last_member_data_timestamp -= 100
         newest_position = (0, 30, 0, 0, 0)
         self.p.timeline_wal_position = Mock(return_value=newest_position)
-        self.assertTrue(self.ha.touch_member())
-        self.assertEqual(self.ha.dcs.touch_member.call_count, 2)
-        second_last_modified = self.ha.dcs.touch_member.call_args[0][0]['last_modified']
+        cached_timestamp = self.ha._last_member_data_timestamp
+        # mock time to advance past the xlog ttl
+        mock_time = [cached_timestamp + 120.0] * 3
+        with patch('patroni.ha.time.time', side_effect=mock_time):
+            self.assertTrue(self.ha.touch_member())
+            self.assertEqual(self.ha.dcs.touch_member.call_count, 2)
+            second_last_modified = self.ha.dcs.touch_member.call_args[0][0]['last_modified']
         self.assertNotEqual(first_last_modified, second_last_modified)
 
     def test_is_leader(self):

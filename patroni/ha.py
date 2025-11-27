@@ -522,11 +522,14 @@ class Ha(object):
             if self._should_skip_xlog_update(data):
                 return True
 
-            data['last_modified'] = datetime.datetime.now(tzutc).isoformat()
+            timestamp = time.time()
+            if timestamp <= self._last_member_data_timestamp:
+                timestamp = self._last_member_data_timestamp + 1e-6
+            data['last_modified'] = datetime.datetime.fromtimestamp(timestamp, tzutc).isoformat()
             ret = self.dcs.touch_member(data)
             if ret:
                 self._last_member_data = data.copy()
-                self._last_member_data_timestamp = time.time()
+                self._last_member_data_timestamp = timestamp
                 new_state = (data['state'], data['role'])
                 if self._last_state != new_state and new_state == (PostgresqlState.RUNNING, PostgresqlRole.PRIMARY):
                     self.notify_mpp_coordinator('after_promote')
