@@ -504,6 +504,7 @@ class TestCtl(unittest.TestCase):
     def test_members(self):
         result = self.runner.invoke(ctl, ['list'])
         assert '127.0.0.1' in result.output
+        assert 'Last modified' not in result.output
         assert result.exit_code == 0
         assert 'Citus cluster: alpha -' in result.output
 
@@ -538,6 +539,7 @@ class TestCtl(unittest.TestCase):
         result = self.runner.invoke(ctl, ['list', 'dummy', '--extended', '--timestamp'])
         assert '2100' in result.output
         assert 'Scheduled restart' in result.output
+        assert 'Last modified' in result.output
 
     def test_list_live_flag(self):
         captured = []
