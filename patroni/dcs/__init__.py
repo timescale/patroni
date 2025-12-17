@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+import typing
 
 from collections import defaultdict
 from copy import deepcopy
@@ -28,6 +29,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..postgresql import Postgresql
     from ..postgresql.misc import PostgresqlRole
     from ..postgresql.mpp import AbstractMPP
+    from ..postgresql.upgrade import UpgradeState
 
 slot_name_re = re.compile('^[a-z0-9_]{1,63}$')
 logger = logging.getLogger(__name__)
@@ -780,6 +782,51 @@ class TimelineHistory(NamedTuple):
         return TimelineHistory(version, value, lines)
 
 
+class Upgrade(NamedTuple):
+    """Object representing upgrade state.
+
+    :ivar initiator: name of the member that started the upgrade process.
+    :ival state: State of the upgrade process.
+    :ivar source_sysid: system ID of the cluster before the upgrade.
+    :ivar source_version: version of the cluster before the upgrade.
+    :ival target_sysid: system ID of the cluster after the upgrade.
+    :ival target_version: version of the cluster after the upgrade.
+    :ival shutdown_lsn: Shutdown checkpoint LSN of the old version.
+    :ival config: Upgrade config
+    :ival progress: Progress of the upgrade.
+    """
+
+    initiator: str
+    state: 'UpgradeState'
+    source_sysid: str
+    source_version: _Version
+    target_sysid: Optional[str]
+    target_version: Optional[_Version]
+    shutdown_lsn: Optional[int]
+    config: Dict[str, Any]
+    progress: List[Tuple[str, str]]
+
+    @staticmethod
+    def from_node(value: Dict[str, Any]) -> Optional['Upgrade']:
+        from ..postgresql.upgrade import UpgradeState
+        try:
+            initiator = value['initiator']
+            state = UpgradeState(value['state'])
+            source_sysid = value['source_sysid']
+            source_version = value['source_version']
+            target_sysid = value.get('target_sysid')
+            target_version = value.get('target_version')
+            shutdown_lsn = value.get('shutdown_lsn')
+            config = value['config']
+            progress = value['progress']
+
+            return Upgrade(initiator, state, source_sysid, source_version, target_sysid, target_version,
+                           shutdown_lsn, config, progress)
+        except (KeyError, ValueError, PatroniAssertionError) as e:
+            logger.warning("Error parsing upgrade state: %s", e)
+            return None
+
+
 class Status(NamedTuple):
     """Immutable object (namedtuple) which represents `/status` key.
 
@@ -794,6 +841,7 @@ class Status(NamedTuple):
     slots: Optional[Dict[str, int]]
     retain_slots: List[str]
     current_site: Optional[str]
+    upgrade: Optional[Upgrade] = None
 
     @staticmethod
     def empty() -> 'Status':
@@ -808,7 +856,8 @@ class Status(NamedTuple):
 
         :returns: ``True`` if all attributes of the current :class:`Status` are unpopulated.
         """
-        return self.last_lsn == 0 and self.slots is None and not self.retain_slots and self.current_site is None
+        return self.last_lsn == 0 and self.slots is None and not self.retain_slots and self.current_site is None \
+            and not self.upgrade
 
     @staticmethod
     def from_node(value: Union[str, Dict[str, Any], None]) -> 'Status':
@@ -853,7 +902,23 @@ class Status(NamedTuple):
         if not isinstance(retain_slots, list):
             retain_slots = []
 
-        return Status(last_lsn, slots, retain_slots, value.get('current_site'))
+        upgrade = value.get('upgrade')
+        if isinstance(value, str):
+            try:
+                upgrade = json.loads(value)
+            except Exception as e:
+                logger.warning('Upgrade from string failed with %s', e)
+                upgrade = None
+        if not isinstance(upgrade, dict):
+            upgrade = None
+        else:
+            try:
+                upgrade = Upgrade.from_node(upgrade)
+            except Exception as e:
+                logger.warning('Invalid upgrade %s: %s', upgrade, e)
+                upgrade = None
+
+        return Status(last_lsn, slots, retain_slots, value.get('current_site'), upgrade)
 
 
 class Cluster(NamedTuple('Cluster',
@@ -1852,9 +1917,8 @@ class AbstractDCS(ClusterSite, abc.ABC):
 
         :param value: JSON serializable dictionary with current WAL LSN and ``confirmed_flush_lsn`` of permanent slots.
         """
-        # This method is always called with ``optime`` key, rest of the keys are optional.
         # In case if we know old values (stored in self._last_status), we will copy them over.
-        for name in ('slots', 'retain_slots', 'current_site'):
+        for name in ('slots', 'retain_slots', 'current_site', self._OPTIME, 'upgrade'):
             if name not in value and self._last_status.get(name):
                 value[name] = self._last_status[name]
         # if the key is present, but the value is None, we will not write such pair.
