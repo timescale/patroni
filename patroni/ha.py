@@ -2239,9 +2239,9 @@ class Ha(object):
             #self.request = PatroniRequest(config, True)
 
         result = self._async_executor.run(self._upgrade.do_upgrade, args=(check_only,))
-        if result is None:
+        if result:
             action = 'upgrade to' if not check_only else 'upgrade check for'
-            return True, f'{action} {desired_version} started'
+            return True, f'{action} {desired_version} successful'
         else:
             return False, result
 
@@ -2251,6 +2251,11 @@ class Ha(object):
         return self.cluster.status.upgrade and self.cluster.status.upgrade.state.is_active()
 
     def start_rsync_from_primary(self, primary_ip: str) -> Optional[str]:
+        with self._async_executor:
+            prev = self._async_executor.schedule('rsync from primary')
+            if prev is not None:
+                return (False, prev + ' already in progress')
+
         if not self.cluster.status.upgrade:
             # TODO: avoid race with having a stale cluster value
             return 'Upgrade is not in progress'
@@ -2459,6 +2464,10 @@ class Ha(object):
             if self._async_executor.busy:
                 return self.handle_long_action_in_progress()
 
+            if self.is_upgrade_running():
+                #TODO: make this way more robust
+                return 'waiting for upgrade'
+
             msg = self.handle_starting_instance()
             if msg is not None:
                 return msg
@@ -2485,10 +2494,6 @@ class Ha(object):
                 # Therefore we want to postpone the leader race if we just started up.
                 if self.cluster.is_unlocked() and self.dcs.__class__.__name__ == 'Raft':
                     return 'started as a secondary'
-
-            if self.is_upgrade_running():
-                #TODO: make this way more robust
-                return 'waiting for upgrade'
 
             # is data directory empty?
             data_directory_error = ''
