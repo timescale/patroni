@@ -196,7 +196,7 @@ hosts deny = *
 
         exclude_subdirs = ['pg_xlog', 'pg_wal', 'log']
         excludes = [
-            f'--exclude={'/' / data_dir / sub_dir / '**'}'
+            f"--exclude={'/' / data_dir / sub_dir / '**'}"
             for data_dir in [current_subdir, target_subdir]
             for sub_dir in exclude_subdirs
         ]
