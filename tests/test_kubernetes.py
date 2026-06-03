@@ -267,6 +267,21 @@ class TestKubernetesConfigMaps(BaseTestKubernetes):
         with patch.object(Kubernetes, '_wait_caches', Mock(side_effect=Exception)):
             self.assertRaises(KubernetesError, self.k.get_cluster)
 
+    def test_write_status_patches_only_status_keys_onto_leader(self):
+        payload = '{"optime":500,"slots":{"a":1},"upgrade":{"state":"precheck","target_version":"18"}}'
+        with patch.object(self.k, 'patch_or_create', Mock(return_value=True)) as pc:
+            self.assertTrue(self.k._write_status(payload))
+        args, kwargs = pc.call_args
+        self.assertEqual(args[0], self.k.leader_path)        # writes to the leader object
+        self.assertTrue(kwargs.get('patch'))                 # MERGE patch
+        annotations = args[1]
+        self.assertEqual(annotations['optime'], '500')
+        self.assertEqual(json.loads(annotations['slots']), {"a": 1})
+        self.assertEqual(json.loads(annotations['upgrade']), {"state": "precheck", "target_version": "18"})
+        # must NOT clobber the leader-lock annotations:
+        for lock_key in ('leader', 'ttl', 'renewTime', 'acquireTime', 'transitions'):
+            self.assertNotIn(lock_key, annotations)
+
     def test__get_citus_cluster(self):
         self.k._mpp = get_mpp({'citus': {'group': 0, 'database': 'postgres'}})
         cluster = self.k.get_cluster()

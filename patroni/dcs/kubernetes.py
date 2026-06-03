@@ -1165,8 +1165,25 @@ class Kubernetes(AbstractDCS):
         raise NotImplementedError  # pragma: no cover
 
     def _write_status(self, value: str) -> bool:
-        """Unused"""
-        raise NotImplementedError  # pragma: no cover
+        """Persist cluster status (optime/slots/retain_slots/upgrade) as annotations on the
+        leader object. Uses a merge patch so the leader-lock annotations (leader, ttl,
+        renewTime, acquireTime, transitions) are preserved. Annotation values must be
+        strings, so non-string values are JSON-encoded (matching update_leader)."""
+        try:
+            data = json.loads(value)
+        except ValueError:
+            return False
+        annotations: Dict[str, Any] = {}
+        for key, val in data.items():
+            if val is None:
+                annotations[key] = None
+            elif isinstance(val, str):
+                annotations[key] = val
+            elif key == self._OPTIME:
+                annotations[key] = str(val)
+            else:
+                annotations[key] = json.dumps(val, separators=(',', ':'))
+        return bool(self.patch_or_create(self.leader_path, annotations, patch=True, retry=False))
 
     def _write_failsafe(self, value: str) -> bool:
         """Unused"""
