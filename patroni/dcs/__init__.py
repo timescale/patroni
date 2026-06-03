@@ -893,9 +893,9 @@ class Status(NamedTuple):
             retain_slots = []
 
         upgrade = value.get('upgrade')
-        if isinstance(value, str):
+        if isinstance(upgrade, str):
             try:
-                upgrade = json.loads(value)
+                upgrade = json.loads(upgrade)
             except Exception as e:
                 logger.warning('Upgrade from string failed with %s', e)
                 upgrade = None
