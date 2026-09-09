@@ -31,8 +31,8 @@ from .dcs import Cluster
 from .exceptions import PostgresConnectionException, PostgresException
 from .postgresql.misc import postgres_version_to_int, PostgresqlRole, PostgresqlState
 from .thread_pool import PatroniThreadPoolExecutor
-from .utils import cluster_as_json, deep_compare, enable_keepalive, parse_bool, \
-    parse_int, patch_config, Retry, RetryFailedError, split_host_port, tzutc, uri
+from .utils import cluster_as_json, deep_compare, enable_keepalive, LiveMemberLSNs, \
+    parse_bool, parse_int, patch_config, Retry, RetryFailedError, split_host_port, tzutc, uri
 
 logger = logging.getLogger(__name__)
 
@@ -465,7 +465,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
         liveness_threshold = patroni.dcs.ttl * (1 if is_primary else 2)
 
         # In maintenance mode (pause) we are fine if heartbeat loop stuck.
-        status_code = 200 if patroni.ha.is_paused() or patroni.next_run + liveness_threshold > time.time() else 503
+        status_code = 200 if patroni.ha.is_paused() or patroni.next_run + liveness_threshold > time.monotonic() else 503
         self._write_status_code_only(status_code)
 
     def _readiness(self) -> Optional[str]:
@@ -552,11 +552,58 @@ class RestApiHandler(BaseHTTPRequestHandler):
         Write an HTTP response with JSON content based on the output of :func:`~patroni.utils.cluster_as_json`, with
         HTTP status ``200`` and the JSON representation of the cluster topology.
         """
+        live_requested = parse_bool(self.path_query.get('live', [None])[0]) or False
         cluster = self.server.patroni.dcs.get_cluster()
+        live_map: Optional[Dict[str, LiveMemberLSNs]] = None
+        if live_requested:
+            if len(cluster.members) > 1:
+                live_map = self.get_live_member_lsns(cluster)
+            else:
+                logger.debug("/cluster live view skipped: single-member cluster")
 
-        response = cluster_as_json(cluster)
+        response = cluster_as_json(cluster, live_map)
         response['scope'] = self.server.patroni.postgresql.scope
         self._write_json_response(200, response)
+
+    @staticmethod
+    def _status_to_live_lsn(status: Dict[str, Any]) -> LiveMemberLSNs:
+        wal: Dict[str, Any] = status.get('wal') or status.get('xlog') or {}
+        receive = parse_int(wal.get('received_location'))
+        replay = parse_int(wal.get('replayed_location'))
+        location = parse_int(wal.get('location')) or replay or receive
+        return LiveMemberLSNs(location, receive, replay)
+
+    def get_live_member_lsns(self, cluster: Cluster) -> Dict[str, LiveMemberLSNs]:
+        """Collect live WAL metrics for local and remote members."""
+        live_map: Dict[str, LiveMemberLSNs] = {}
+        local_name = self.server.patroni.postgresql.name
+
+        try:
+            local_status = self._status_to_live_lsn(self.get_postgresql_status(True))
+            if any((local_status.lsn, local_status.receive_lsn, local_status.replay_lsn)):
+                live_map[local_name] = local_status
+        except Exception as e:  # pragma: no cover - defensive, tested via mocks
+            logger.debug("Failed to collect local live status: %s", e)
+
+        members = [m for m in cluster.members if m.name != local_name and m.api_url]
+        if not members:
+            return live_map
+
+        try:
+            statuses = self.server.patroni.ha.fetch_nodes_statuses(members)
+        except Exception as e:  # pragma: no cover - defensive; exercised via unit tests
+            logger.debug("Failed to collect remote live statuses: %s", e)
+            return live_map
+
+        for status in statuses:
+            member_name = status.member and status.member.name
+            if not member_name:
+                continue
+            if status.reachable and status.data:
+                converted = self._status_to_live_lsn(status.data)
+                if any((converted.lsn, converted.receive_lsn, converted.replay_lsn)):
+                    live_map[member_name] = converted
+        return live_map
 
     def do_GET_history(self) -> None:
         """Handle a ``GET`` request to ``/history`` path.
@@ -1159,7 +1206,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     else:
                         return 200, '{0}ed over to "{1}" instead of "{2}"'.format(action[:-4].title(),
                                                                                   cluster.leader.name, candidate)
-                if not cluster.failover:
+                if not cluster.failover and not cluster.is_unlocked():
                     return 503, action.title() + ' failed'
             except Exception as e:
                 logger.debug('Exception occurred during polling %s result: %s', action, e)
@@ -1498,13 +1545,23 @@ class RestApiHandler(BaseHTTPRequestHandler):
         result['dcs_last_seen'] = self.server.patroni.dcs.last_seen
         return result
 
+    def setup(self) -> None:
+        """Prepare the connection to handle a request.
+
+        Wrapper for :func:`~socketserver.StreamRequestHandler.setup` that additionally arms a timeout on
+        the connection. Without it a client that connects and then stays silent, or that never reads
+        the response, holds one of the ``restapi.thread_pool_size`` workers forever.
+        """
+        super(RestApiHandler, self).setup()
+        self.connection.settimeout(self.server.request_timeout)
+
     def handle_one_request(self) -> None:
         """Parse and dispatch a request to the appropriate ``do_*`` method.
 
         .. note::
             This is only used to keep track of latency when logging messages through :func:`log_message`.
         """
-        self.__start_time = time.time()
+        self.__start_time = time.monotonic()
         BaseHTTPRequestHandler.handle_one_request(self)
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -1515,7 +1572,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
         :param format: printf-style format string message to be logged.
         :param args: arguments to be applied as inputs to *format*.
         """
-        latency = 1000.0 * (time.time() - self.__start_time)
+        latency = 1000.0 * (time.monotonic() - self.__start_time)
         logger.debug("API thread: %s - - %s latency: %0.3f ms", self.client_address[0], format % args, latency)
 
 
@@ -1537,10 +1594,12 @@ class RestApiServer(ThreadingMixIn, HTTPServer):
         self.__auth_key = None
         self.__allowlist_include_members: Optional[bool] = None
         self.__allowlist: Tuple[Union[IPv4Network, IPv6Network], ...] = ()
+        self.__handshake_timeout: int = 2
         self.http_extra_headers: Dict[str, str] = {}
         self.patroni = patroni
         self.__listen = None
         self.request_queue_size = int(config.get('request_queue_size', 5))
+        self.request_timeout: int = 5
         try:
             thread_pool_size = max(5, int(config.get('thread_pool_size', 5)))
         except Exception as e:
@@ -1872,7 +1931,12 @@ class RestApiServer(ThreadingMixIn, HTTPServer):
         if hasattr(request, 'context'):  # SSLSocket
             from ssl import SSLSocket
             if isinstance(request, SSLSocket):  # pyright
+                previous_timeout = request.gettimeout()
                 try:
+                    # Without a timeout, a client that opens the connection and never sends a ClientHello
+                    # blocks this worker forever, and `restapi.thread_pool_size`. Such clients are enough
+                    # to make the REST API stop answering until Patroni is restarted.
+                    request.settimeout(self.__handshake_timeout)
                     request.do_handshake()
                 except OSError as e:
                     # The client may reset the connection (or otherwise fail the TLS handshake, e.g.
@@ -1884,6 +1948,7 @@ class RestApiServer(ThreadingMixIn, HTTPServer):
                                  client_address[0], client_address[1], e)
                     self.shutdown_request(request)
                     return
+                request.settimeout(previous_timeout)
         super(RestApiServer, self).process_request_thread(request, client_address)
 
     def process_request(self, request: Union[socket.socket, Tuple[bytes, socket.socket]],
@@ -2009,6 +2074,8 @@ class RestApiServer(ThreadingMixIn, HTTPServer):
 
         self.__allowlist = tuple(self._build_allowlist(config.get('allowlist')))
         self.__allowlist_include_members = config.get('allowlist_include_members')
+        self.__handshake_timeout = self._parse_timeout(config, 'handshake_timeout', 2)
+        self.request_timeout = self._parse_timeout(config, 'request_timeout', 5)
 
         ssl_options = {n: config[n] for n in ('certfile', 'keyfile', 'keyfile_password',
                                               'cafile', 'ciphers') if n in config}
@@ -2031,6 +2098,22 @@ class RestApiServer(ThreadingMixIn, HTTPServer):
 
         # Define the Server header response using the server_tokens option.
         self.server_header = self.construct_server_tokens(config.get('server_tokens', 'original'))
+
+    @staticmethod
+    def _parse_timeout(config: Dict[str, Any], name: str, default: int) -> int:
+        """Get the value of the *name* timeout, in seconds.
+
+        :param config: dictionary representing values under the ``restapi`` configuration section.
+        :param name: name of the timeout setting in *config*.
+        :param default: value to be used if *name* is absent or invalid.
+
+        :returns: value of ``restapi.<name>``, never below one second.
+        """
+        try:
+            return max(1, int(config.get(name, default)))
+        except Exception as e:
+            logger.warning('Failed to parse restapi.%s value "%s": %r', name, config.get(name), e)
+            return default
 
     def handle_error(self, request: Union[socket.socket, Tuple[bytes, socket.socket]],
                      client_address: Tuple[str, int]) -> None:

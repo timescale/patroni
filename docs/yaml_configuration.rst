@@ -342,6 +342,10 @@ PostgreSQL
    -  **pg\_ident\_primary**: (optional) role-specific pg_ident entries for primary. These completely replace **pg_ident** (no merging). If not defined, **pg_ident** is used.
    -  **pg\_ident\_replica**: (optional) role-specific pg_ident entries for replica. These completely replace **pg_ident** (no merging). If not defined, **pg_ident** is used.
    -  **pg\_ident\_standby\_leader**: (optional) role-specific pg_ident entries for standby_leader. These completely replace **pg_ident** (no merging). If not defined, **pg_ident** is used.
+   -  **pg\_hosts**: (PostgreSQL 19+ only) list of lines that Patroni will use to generate ``pg_hosts.conf``. Patroni ignores this parameter if ``hosts_file`` PostgreSQL parameter is set to a non-default value. Together with :ref:`dynamic configuration <dynamic_configuration>` this parameter simplifies management of ``pg_hosts.conf``.
+   -  **pg\_hosts\_primary**: (optional) role-specific pg_hosts entries for primary. These completely replace **pg_hosts** (no merging). If not defined, **pg_hosts** is used.
+   -  **pg\_hosts\_replica**: (optional) role-specific pg_hosts entries for replica. These completely replace **pg_hosts** (no merging). If not defined, **pg_hosts** is used.
+   -  **pg\_hosts\_standby\_leader**: (optional) role-specific pg_hosts entries for standby_leader. These completely replace **pg_hosts** (no merging). If not defined, **pg_hosts** is used.
    -  **pg\_ctl\_timeout**: How long should pg_ctl wait when doing ``start``, ``stop`` or ``restart``. Default value is 60 seconds.
    -  **use\_pg\_rewind**: try to use pg\_rewind on the former leader when it joins cluster as a replica. Either the cluster must be initialized with ``data page checksums`` (``--data-checksums`` option for ``initdb``) and/or ``wal_log_hints`` must be set to ``on``, or ``pg_rewind`` will not work.
    -  **rewind**: (optional) custom options to pass to the ``pg_rewind`` command. Can be specified as a list of strings and/or single key-value dictionaries. Not allowed options include: ``target-pgdata``, ``source-pgdata``, ``source-server``, ``write-recovery-conf``, ``dry-run``, ``restore-target-wal``, ``config-file``, ``no-ensure-shutdown``, ``version``, and ``help``. When the ``progress`` option is used, the ``pg_rewind`` output is streamed to the Patroni log as it arrives. Example usage:
@@ -384,6 +388,8 @@ REST API
    -  **http\_extra\_headers**: (optional): HTTP headers let the REST API server pass additional information with an HTTP response.
    -  **https\_extra\_headers**: (optional): HTTPS headers let the REST API server pass additional information with an HTTP response when TLS is enabled. This will also pass additional information set in ``http_extra_headers``.
    -  **request_queue_size**: (optional): Sets request queue size for TCP socket used by Patroni REST API.  Once the queue is full, further requests get a "Connection denied" error. The default value is 5.
+   -  **handshake\_timeout**: (optional): Maximum time in seconds a single client is given to complete the TLS handshake. Connections that do not complete it in time are closed. It only applies when ``certfile`` is set. The default value is 2.
+   -  **request\_timeout**: (optional): Maximum time in seconds a single client is given to send its request, and to read the response. Connections that stay silent for longer are closed. The default value is 5.
    -  **server_tokens**: (optional): Configures the value of the ``Server`` HTTP header.
       - ``Minimal``: The header will contain only the Patroni version, e.g. ``Patroni/4.0.0``.
       - ``ProductOnly``: The header will contain only the product name, e.g. ``Patroni``.

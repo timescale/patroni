@@ -98,6 +98,7 @@ class Config(object):
     __CACHE_FILENAME = 'patroni.dynamic.json'
     __DEFAULT_CONFIG: Dict[str, Any] = {
         'ttl': 30, 'loop_wait': 10, 'retry_timeout': 10,
+        'xlog_cache_ttl': 0,
         'standby_cluster': {
             'create_replica_methods': '',
             'host': '',
@@ -505,6 +506,12 @@ class Config(object):
             if value:
                 ret[param] = value
 
+        value = _popenv('xlog_cache_ttl')
+        if value:
+            value = parse_int(value)
+            if value is not None:
+                ret['xlog_cache_ttl'] = value
+
         def _fix_log_env(name: str, oldname: str) -> None:
             """Normalize a log related environment variable.
 
@@ -549,7 +556,8 @@ class Config(object):
         _set_section_values('restapi', ['listen', 'connect_address', 'certfile', 'keyfile', 'keyfile_password',
                                         'cafile', 'ciphers', 'verify_client', 'http_extra_headers',
                                         'https_extra_headers', 'allowlist', 'allowlist_include_members',
-                                        'request_queue_size', 'server_tokens'])
+                                        'request_queue_size', 'handshake_timeout', 'request_timeout',
+                                        'server_tokens'])
         _set_section_values('ctl', ['insecure', 'cacert', 'certfile', 'keyfile', 'keyfile_password'])
         _set_section_values('postgresql', ['listen', 'connect_address', 'proxy_address',
                                            'config_dir', 'data_dir', 'pgpass', 'bin_dir'])
@@ -574,7 +582,8 @@ class Config(object):
                 if value is not None:
                     ret[first][second] = value
 
-        for first, params in (('restapi', ('request_queue_size', 'thread_pool_size')),
+        for first, params in (('restapi', ('request_queue_size', 'thread_pool_size',
+                                           'handshake_timeout', 'request_timeout')),
                               ('log', ('max_queue_size', 'file_size', 'file_num', 'mode'))):
             for second in params:
                 value = ret.get(first, {}).pop(second, None)
@@ -837,6 +846,7 @@ class Config(object):
         2. Applying role-specific parameter overrides (parameters_primary, etc.) - merged with base
         3. Applying role-specific pg_hba overrides (pg_hba_primary, etc.) - full replacement
         4. Applying role-specific pg_ident overrides (pg_ident_primary, etc.) - full replacement
+        5. Applying role-specific pg_hosts overrides (pg_hosts_primary, etc.) - full replacement
 
         .. note::
             Protected parameters from ConfigHandler.CMDLINE_OPTIONS are never overridden.
@@ -863,15 +873,11 @@ class Config(object):
                     logger.warning("Role-based config attempted to override protected parameter '%s', ignoring", param)
             pg_config['parameters'] = base_params
 
-        # Fully replace pg_hba, not merge
-        role_hba_key = f'pg_hba_{role_suffix}'
-        if role_hba_key in pg_config:
-            pg_config['pg_hba'] = pg_config[role_hba_key]
-
-        # Fully replace pg_ident, not merge
-        role_ident_key = f'pg_ident_{role_suffix}'
-        if role_ident_key in pg_config:
-            pg_config['pg_ident'] = pg_config[role_ident_key]
+        # Fully replace role-specific file contents, not merge
+        for name in ('pg_hba', 'pg_ident', 'pg_hosts'):
+            role_config_key = f'{name}_{role_suffix}'
+            if role_config_key in pg_config:
+                pg_config[name] = pg_config[role_config_key]
 
         return pg_config
 

@@ -32,6 +32,7 @@ from . import MockPostmaster, PostgresInit, psycopg_connect, requests_get
 from .test_etcd import etcd_read, etcd_write, socket_getaddrinfo
 
 SYSID = '12345678901'
+LAST_MODIFIED = '2100-01-01T00:00:00+00:00'
 
 
 def true(*args, **kwargs):
@@ -62,7 +63,8 @@ def get_cluster_bootstrapping_without_leader(cluster_config=None):
 def get_cluster_initialized_without_leader(leader=False, failover=None, sync=None, cluster_config=None, failsafe=False):
     m1 = Member(0, 'leader', 28, {'conn_url': 'postgres://replicator:rep-pass@127.0.0.1:5435/postgres',
                                   'api_url': 'http://127.0.0.1:8008/patroni', 'xlog_location': 4,
-                                  'role': PostgresqlRole.PRIMARY, 'state': 'running', 'site': 'dc1'})
+                                  'role': PostgresqlRole.PRIMARY, 'state': 'running', 'site': 'dc1',
+                                  'last_modified': LAST_MODIFIED})
     leader = Leader(0, 0, m1 if leader else Member(0, '', 28, {}))
     m2 = Member(0, 'other', 28, {'conn_url': 'postgres://replicator:rep-pass@127.0.0.1:5436/postgres',
                                  'api_url': 'http://127.0.0.1:8011/patroni',
@@ -71,7 +73,8 @@ def get_cluster_initialized_without_leader(leader=False, failover=None, sync=Non
                                  'pause': True,
                                  'tags': {'clonefrom': True},
                                  'scheduled_restart': {'schedule': "2100-01-01 10:53:07.560445+00:00",
-                                                       'postgres_version': '99.0.0'}})
+                                                       'postgres_version': '99.0.0'},
+                                 'last_modified': LAST_MODIFIED})
     syncstate = SyncState(0 if sync else None, sync and sync[0],
                           sync and sync[1], sync[2] if sync and len(sync) > 2 else 0)
     failsafe = {m.name: m.api_url for m in (m1, m2)} if failsafe else None
@@ -93,7 +96,7 @@ def get_standby_cluster_initialized_with_only_leader(failover=None, sync=None):
             "standby_cluster": {
                 "host": "localhost",
                 "port": 5432,
-                "primary_slot_name": "",
+                "primary_slot_name": None,
             }}, 1)
     )
     cluster.leader.data['role'] = PostgresqlRole.STANDBY_LEADER
@@ -195,7 +198,7 @@ def run_async(self, func, args=()):
     'Latest checkpoint location': '0/12345678',
     "Latest checkpoint's TimeLineID": '2'}))
 @patch.object(SlotsHandler, 'load_replication_slots', Mock(side_effect=Exception))
-@patch.object(ConfigHandler, 'pg_version', PropertyMock(return_value=180000))
+@patch.object(ConfigHandler, 'pg_version', PropertyMock(return_value=190000))
 @patch.object(ConfigHandler, 'append_pg_hba', Mock())
 @patch.object(ConfigHandler, 'write_pgpass', Mock(return_value={}))
 @patch.object(ConfigHandler, 'write_recovery_conf', Mock())
@@ -261,6 +264,53 @@ class TestHa(PostgresInit):
         self.ha.dcs.touch_member = true
         self.ha.touch_member()
 
+    @patch('patroni.postgresql.Postgresql.replication_state', Mock(return_value='streaming'))
+    @patch.object(Postgresql, 'received_timeline', Mock(return_value=None))
+    def test_touch_member_xlog_cache_ttl(self):
+        self.ha.patroni.config._Config__effective_configuration['xlog_cache_ttl'] = 60
+        self.p._major_version = 110000
+        self.p.is_primary = false
+        base_position = (0, 10, 0, 0, 0)
+        self.p.timeline_wal_position = Mock(return_value=base_position)
+        self.p.replica_cached_timeline = Mock(return_value=0)
+        self.ha.dcs.touch_member = Mock(return_value=True)
+
+        self.assertTrue(self.ha.touch_member())
+        self.assertEqual(self.ha.dcs.touch_member.call_count, 1)
+        last_call_data = self.ha.dcs.touch_member.call_args[0][0]
+        self.assertIn('last_modified', last_call_data)
+        first_last_modified = last_call_data['last_modified']
+        self.assertEqual(self.ha._last_member_data['last_modified'], first_last_modified)
+
+        # identical payload should refresh DCS but keep timestamp
+        self.p.timeline_wal_position = Mock(return_value=base_position)
+        self.assertTrue(self.ha.touch_member())
+        self.assertEqual(self.ha.dcs.touch_member.call_count, 2)
+        self.assertEqual(self.ha._last_member_data['last_modified'], first_last_modified)
+
+        new_position = (0, 10, 0, 1, 1)
+        self.p.timeline_wal_position = Mock(return_value=new_position)
+        self.assertTrue(self.ha.touch_member())
+        self.assertEqual(self.ha.dcs.touch_member.call_count, 3)
+        self.assertEqual(self.ha._last_member_data['last_modified'], first_last_modified)
+
+        newest_position = (0, 30, 0, 2, 2)
+        self.p.timeline_wal_position = Mock(return_value=newest_position)
+        cached_timestamp = self.ha._last_member_data_timestamp
+        # mock time to advance past the xlog ttl
+        mock_time = [cached_timestamp + 120.0] * 3
+        with patch('patroni.ha.time.time', side_effect=mock_time):
+            self.assertTrue(self.ha.touch_member())
+            self.assertEqual(self.ha.dcs.touch_member.call_count, 4)
+            second_last_modified = self.ha.dcs.touch_member.call_args[0][0]['last_modified']
+        self.assertNotEqual(first_last_modified, second_last_modified)
+
+        latest_position = (0, 40, 0, 3, 3)
+        self.p.timeline_wal_position = Mock(return_value=latest_position)
+        self.assertTrue(self.ha.touch_member())
+        self.assertEqual(self.ha.dcs.touch_member.call_count, 5)
+        self.assertEqual(self.ha._last_member_data['last_modified'], second_last_modified)
+
     def test_is_leader(self):
         self.assertFalse(self.ha.is_leader())
 
@@ -272,7 +322,7 @@ class TestHa(PostgresInit):
     def test_bootstrap_as_standby_leader(self, initialize):
         self.p.data_directory_empty = true
         self.ha.cluster = get_cluster_not_initialized_without_leader(
-            cluster_config=ClusterConfig(1, {"standby_cluster": {"port": 5432}}, 1))
+            cluster_config=ClusterConfig(1, {"standby_cluster": {"port": 5432, 'primary_slot_name': None}}, 1))
         self.assertEqual(self.ha.run_cycle(), 'trying to bootstrap a new standby leader')
 
     def test_bootstrap_waiting_for_standby_leader(self):
@@ -540,6 +590,7 @@ class TestHa(PostgresInit):
         self.ha.load_cluster_from_dcs = Mock(side_effect=DCSError('Etcd is not responding properly'))
         self.assertEqual(self.ha.run_cycle(), 'demoted self because DCS is not accessible and I was a leader')
 
+    @patch('patroni.ha.time.monotonic', Mock(return_value=100))
     def test_check_failsafe_topology(self):
         self.ha.load_cluster_from_dcs = Mock(side_effect=DCSError('Etcd is not responding properly'))
         self.ha.cluster = get_cluster_initialized_with_leader_and_failsafe()
@@ -2207,7 +2258,7 @@ class TestHa(PostgresInit):
 
         # Test that _process_quorum_replication doesn't take longer than loop_wait
         with patch.object(Postgresql, 'synchronous_standby_names', Mock(return_value='ANY 1 (foo)')), \
-                patch('time.time', Mock(side_effect=[30, 60, 90, 120, 150])):
+                patch('time.monotonic', Mock(side_effect=[30, 60, 90, 120, 150])):
             self.ha.process_sync_replication()
 
         # Test foo -> ANY 1 (foo) transition

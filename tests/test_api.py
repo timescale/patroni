@@ -13,13 +13,13 @@ from patroni.dcs import ClusterConfig, Member
 from patroni.exceptions import PostgresConnectionException
 from patroni.ha import _MemberStatus
 from patroni.postgresql.config import get_param_diff
-from patroni.postgresql.misc import PostgresqlRole, PostgresqlState
+from patroni.postgresql.misc import format_lsn, PostgresqlRole, PostgresqlState
 from patroni.psycopg import OperationalError
-from patroni.utils import RetryFailedError, tzutc
+from patroni.utils import LiveMemberLSNs, RetryFailedError, tzutc
 
 from . import MockConnect, psycopg_connect
 from .test_etcd import socket_getaddrinfo
-from .test_ha import get_cluster_initialized_without_leader
+from .test_ha import get_cluster_initialized_with_only_leader, get_cluster_initialized_without_leader
 
 future_restart_time = datetime.datetime.now(tzutc) + datetime.timedelta(days=5)
 postmaster_start_time = datetime.datetime.now(tzutc)
@@ -185,6 +185,9 @@ class MockRequest(object):
         return IO(self.request)
 
     def sendall(self, *args, **kwargs):
+        pass
+
+    def settimeout(self, *args, **kwargs):
         pass
 
 
@@ -412,12 +415,105 @@ class TestRestApiHandler(unittest.TestCase):
     def test_do_GET_cluster(self, mock_dcs):
         mock_dcs.get_cluster.return_value = get_cluster_initialized_without_leader()
         mock_dcs.get_cluster.return_value.members[1].data['xlog_location'] = 11
-        self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /cluster'))
+        with patch.object(RestApiHandler, 'get_live_member_lsns') as live_mock, \
+                patch.object(RestApiHandler, '_write_json_response') as responder:
+            self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /cluster'))
+            live_mock.assert_not_called()
+        payload = responder.call_args[0][1]
+        replica = next(m for m in payload['members'] if m['role'] == 'replica')
+        self.assertEqual(replica['lsn_source'], 'dcs')
+
+    def _make_handler(self):
+        handler = RestApiHandler.__new__(RestApiHandler)  # type: ignore
+        handler.server = Mock()
+        handler.server.patroni = MockPatroni()
+        return handler
+
+    def test_get_live_member_lsns_success(self):
+        handler = self._make_handler()
+        cluster = get_cluster_initialized_without_leader(leader=True)
+        remote = next(m for m in cluster.members if m.name != cluster.leader.name)
+        handler.get_postgresql_status = Mock(return_value={'xlog': {'location': 30}})
+        status = _MemberStatus(remote, True, True, 0, {'xlog': {'received_location': 12, 'replayed_location': 11}})
+        with patch.object(handler.server.patroni.ha, 'fetch_nodes_statuses', Mock(return_value=[status])):
+            with patch.object(handler.server.patroni.postgresql, 'name', cluster.leader.name):
+                live_map = handler.get_live_member_lsns(cluster)
+        self.assertIn(cluster.leader.name, live_map)
+        self.assertEqual(live_map[cluster.leader.name].lsn, 30)
+        self.assertEqual(live_map[remote.name].receive_lsn, 12)
+        self.assertEqual(live_map[remote.name].replay_lsn, 11)
+
+    def test_get_live_member_lsns_timeout(self):
+        handler = self._make_handler()
+        cluster = get_cluster_initialized_without_leader(leader=True)
+        remote = next(m for m in cluster.members if m.name != cluster.leader.name)
+        handler.get_postgresql_status = Mock(return_value={'xlog': {'location': 20}})
+        status = _MemberStatus(remote, False, None, 0, {})
+        with patch.object(handler.server.patroni.ha, 'fetch_nodes_statuses', Mock(return_value=[status])):
+            with patch.object(handler.server.patroni.postgresql, 'name', cluster.leader.name):
+                live_map = handler.get_live_member_lsns(cluster)
+        self.assertNotIn(remote.name, live_map)
+
+    def test_get_live_member_lsns_local_failure(self):
+        handler = self._make_handler()
+        cluster = get_cluster_initialized_without_leader(leader=True)
+        handler.get_postgresql_status = Mock(side_effect=Exception("boom"))
+        with patch.object(handler.server.patroni.ha, 'fetch_nodes_statuses', Mock(return_value=[])):
+            with patch.object(handler.server.patroni.postgresql, 'name', cluster.leader.name):
+                live_map = handler.get_live_member_lsns(cluster)
+        self.assertNotIn(cluster.leader.name, live_map)
+
+    def test_get_live_member_lsns_fetch_exception(self):
+        handler = self._make_handler()
+        cluster = get_cluster_initialized_without_leader(leader=True)
+        handler.get_postgresql_status = Mock(return_value={'xlog': {'location': 15}})
+        fetch_mock = Mock(side_effect=Exception("network"))
+        with patch.object(handler.server.patroni.ha, 'fetch_nodes_statuses', fetch_mock):
+            with patch.object(handler.server.patroni.postgresql, 'name', cluster.leader.name):
+                live_map = handler.get_live_member_lsns(cluster)
+        self.assertEqual(live_map[cluster.leader.name].lsn, 15)
+
+    def test_status_to_live_lsn_missing_fields(self):
+        handler = self._make_handler()
+        status = handler._status_to_live_lsn({})
+        self.assertEqual(status, LiveMemberLSNs())
+
+    def test_status_to_live_lsn_replay_fallback(self):
+        handler = self._make_handler()
+        status = handler._status_to_live_lsn({'xlog': {'replayed_location': 123, 'received_location': 120}})
+        self.assertEqual(status.lsn, 123)
+        self.assertEqual(status.replay_lsn, 123)
+        self.assertEqual(status.receive_lsn, 120)
 
     @patch.object(MockPatroni, 'dcs')
     def test_do_GET_history(self, mock_dcs):
         mock_dcs.cluster = get_cluster_initialized_without_leader()
         self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /history'))
+
+    @patch.object(MockPatroni, 'dcs')
+    def test_do_GET_cluster_live_skips_single_member(self, mock_dcs):
+        mock_dcs.get_cluster.return_value = get_cluster_initialized_with_only_leader()
+        with patch.object(RestApiHandler, 'get_live_member_lsns') as live_mock, \
+                patch.object(RestApiHandler, '_write_json_response') as responder:
+            MockRestApiServer(RestApiHandler, 'GET /cluster?live=1')
+        live_mock.assert_not_called()
+        payload = responder.call_args[0][1]
+        self.assertNotIn('lag_source', payload)
+
+    @patch.object(MockPatroni, 'dcs')
+    def test_do_GET_cluster_live_uses_helper(self, mock_dcs):
+        cluster = get_cluster_initialized_without_leader(leader=True)
+        mock_dcs.get_cluster.return_value = cluster
+        live_map = {'other': LiveMemberLSNs(lsn=20, receive_lsn=18, replay_lsn=16)}
+        live_mock = Mock(return_value=live_map)
+        with patch.object(RestApiHandler, 'get_live_member_lsns', live_mock), \
+                patch.object(RestApiHandler, '_write_json_response') as responder:
+            MockRestApiServer(RestApiHandler, 'GET /cluster?live=1')
+        live_mock.assert_called_once()
+        payload = responder.call_args[0][1]
+        replica = next(m for m in payload['members'] if m['name'] == 'other')
+        self.assertEqual(replica['lsn'], format_lsn(20))
+        self.assertEqual(replica['lsn_source'], 'live')
 
     @patch.object(MockPatroni, 'dcs')
     def test_do_GET_config(self, mock_dcs):
@@ -663,6 +759,7 @@ class TestRestApiHandler(unittest.TestCase):
         # Failover key is empty in DCS
         with patch.object(RestApiHandler, 'write_response') as response_mock:
             cluster.failover = None
+            cluster.is_unlocked.return_value = False
             MockRestApiServer(RestApiHandler, request)
             response_mock.assert_called_with(503, 'Switchover failed')
 
@@ -790,6 +887,13 @@ class TestRestApiHandler(unittest.TestCase):
         MockRestApiServer(RestApiHandler, post + '0\n\n')
         MockRestApiServer(RestApiHandler, post + '14\n\n{"leader":"1"}')
 
+    def test_setup_bounds_request_with_a_timeout(self):
+        # A client that completes the TLS handshake (or connects in plain HTTP) and then sends nothing
+        # would otherwise hold a pool worker forever, so the connection gets a timeout of its own.
+        with patch.object(MockRequest, 'settimeout') as mock_settimeout:
+            MockRestApiServer(RestApiHandler, 'GET /replica')
+        mock_settimeout.assert_called_once_with(5)
+
 
 class TestRestApiServer(unittest.TestCase):
 
@@ -888,6 +992,83 @@ class TestRestApiServer(unittest.TestCase):
             mock_finish.assert_not_called()
             mock_shutdown.assert_called_once_with(sock)
             self.assertTrue(any('SSL handshake' in c[0][0] for c in mock_debug.call_args_list if c[0]))
+
+    def test_process_request_thread_ssl_handshake_timeout(self):
+        import ssl
+
+        # A client that opens a TCP connection to the TLS port and never sends a ClientHello would
+        # otherwise block a pool worker forever. The handshake must be bounded by a timeout, and the
+        # socket must go back to its original timeout once the handshake succeeded.
+        sock = self.__create_socket()
+        if not isinstance(sock, ssl.SSLSocket):  # pragma: no cover - ssl not available
+            self.skipTest('ssl is not available')
+
+        sock.do_handshake = Mock(side_effect=socket.timeout('timed out'))
+        with patch.object(sock, 'settimeout') as mock_settimeout, \
+                patch.object(self.srv, 'shutdown_request') as mock_shutdown, \
+                patch.object(RestApiServer, 'finish_request') as mock_finish:
+            self.assertIsNone(self.srv.process_request_thread(sock, ('127.0.0.1', 55555)))
+        mock_settimeout.assert_called_once_with(2)
+        mock_finish.assert_not_called()
+        mock_shutdown.assert_called_once_with(sock)
+
+        sock.do_handshake = Mock()
+        with patch.object(sock, 'settimeout') as mock_settimeout, \
+                patch.object(RestApiServer, 'finish_request', Mock()):
+            self.srv.process_request_thread(sock, ('127.0.0.1', 55555))
+        self.assertEqual([c[0][0] for c in mock_settimeout.call_args_list], [2, None])
+
+    @patch.object(HTTPServer, '__init__', Mock())
+    def test_request_timeout_config(self):
+        def reload_config(config):
+            with patch.object(MockRestApiServer, 'server_close', Mock()):
+                self.srv.reload_config(dict(config, listen=':8008'))
+
+        reload_config({})
+        self.assertEqual(self.srv.request_timeout, 5)
+
+        reload_config({'request_timeout': 30})
+        self.assertEqual(self.srv.request_timeout, 30)
+
+        reload_config({'request_timeout': 0})
+        self.assertEqual(self.srv.request_timeout, 1)
+
+        with patch('patroni.api.logger.warning') as mock_warning:
+            reload_config({'request_timeout': 'foo'})
+        self.assertEqual(self.srv.request_timeout, 5)
+        self.assertTrue(any('request_timeout' in str(c) for c in mock_warning.call_args_list))
+
+    @patch.object(HTTPServer, '__init__', Mock())
+    def test_handshake_timeout_config(self):
+        import ssl
+
+        if not isinstance(self.__create_socket(), ssl.SSLSocket):  # pragma: no cover - ssl not available
+            self.skipTest('ssl is not available')
+
+        def handshake_timeout():
+            sock = self.__create_socket()
+            with patch.object(sock, 'settimeout') as mock_settimeout, \
+                    patch.object(RestApiServer, 'finish_request', Mock()):
+                self.srv.process_request_thread(sock, ('127.0.0.1', 55555))
+            return mock_settimeout.call_args_list[0][0][0]
+
+        def reload_config(config):
+            with patch.object(MockRestApiServer, 'server_close', Mock()):
+                self.srv.reload_config(dict(config, listen=':8008'))
+
+        reload_config({'handshake_timeout': 15})
+        self.assertEqual(handshake_timeout(), 15)
+
+        with patch('patroni.api.logger.warning') as mock_warning:
+            reload_config({'handshake_timeout': 'foo'})
+        self.assertEqual(handshake_timeout(), 2)
+        self.assertTrue(any('handshake_timeout' in str(c) for c in mock_warning.call_args_list))
+
+        reload_config({'handshake_timeout': 0})
+        self.assertEqual(handshake_timeout(), 1)
+
+        reload_config({})
+        self.assertEqual(handshake_timeout(), 2)
 
     @patch.object(MockRestApiServer, 'process_request', Mock(side_effect=RuntimeError))
     @patch.object(MockRestApiServer, 'get_request')

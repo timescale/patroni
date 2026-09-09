@@ -243,7 +243,7 @@ class K8sClient(object):
             self.pool_manager = urllib3.PoolManager(**k8s_config.pool_config)
             self._base_uri = k8s_config.server
             self._api_servers_cache = [k8s_config.server]
-            self._api_servers_cache_updated = 0
+            self._api_servers_cache_updated = float('-inf')
             self.set_api_servers_cache_ttl(10)
             self.set_read_timeout(10)
             try:
@@ -330,10 +330,11 @@ class K8sClient(object):
 
             if self._base_uri not in self._api_servers_cache:
                 self.set_base_uri(self._api_servers_cache[0])
-            self._api_servers_cache_updated = time.time()
+            self._api_servers_cache_updated = time.monotonic()
 
         def refresh_api_servers_cache(self) -> None:
-            if self._bypass_api_service and time.time() - self._api_servers_cache_updated > self._api_servers_cache_ttl:
+            if self._bypass_api_service and \
+                    time.monotonic() - self._api_servers_cache_updated > self._api_servers_cache_ttl:
                 self._refresh_api_servers_cache()
 
         def _load_api_servers_cache(self) -> None:
@@ -426,7 +427,7 @@ class K8sClient(object):
                     if TYPE_CHECKING:  # pragma: no cover
                         assert isinstance(retry, Retry)  # K8sConnectionFailed is raised only if retry is not None!
                     sleeptime = retry.sleeptime
-                    remaining_time = (retry.stoptime or time.time()) - sleeptime - time.time()
+                    remaining_time = retry.stoptime - sleeptime - time.monotonic()
                     nodes, timeout, retries = self._calculate_timeouts(api_servers, remaining_time)
                     if nodes == 0:
                         self._update_api_servers_cache = True
@@ -788,10 +789,9 @@ class Kubernetes(AbstractDCS):
         self._api = CoreV1ApiProxy(config.get('use_endpoints'), bypass_api_service)
         self._should_create_config_service = self._api.use_endpoints
         self.reload_config(config)
-        # leader_observed_record, leader_resource_version, and leader_observed_time are used only for leader race!
+        # leader_observed_record and leader_observed_time are used only for leader race!
         self._leader_observed_record: Dict[str, str] = {}
         self._leader_observed_time = None
-        self._leader_resource_version = None
         self.__do_not_watch = False
 
         self._condition = Condition()
@@ -858,7 +858,7 @@ class Kubernetes(AbstractDCS):
 
     def _wait_caches(self, stop_time: float) -> None:
         while not (self._pods.is_ready() and self._kinds.is_ready()):
-            timeout = stop_time - time.time()
+            timeout = stop_time - time.monotonic()
             if timeout <= 0:
                 raise RetryFailedError('Exceeded retry deadline')
             self._condition.wait(timeout)
@@ -888,8 +888,6 @@ class Kubernetes(AbstractDCS):
         leader_path = path[:-1] if self._api.use_endpoints else path + self._LEADER
         leader = nodes.get(leader_path)
         metadata = leader and leader.metadata
-        if leader_path == self.leader_path:  # We want to memorize leader_resource_version only for our cluster
-            self._leader_resource_version = metadata.resource_version if metadata else None
         annotations: Dict[str, str] = metadata and metadata.annotations or {}
 
         # get last known leader lsn and slots
@@ -908,7 +906,10 @@ class Kubernetes(AbstractDCS):
         if leader_path == self.leader_path and (leader_record or self._leader_observed_record)\
                 and leader_record != self._leader_observed_record:
             self._leader_observed_record = leader_record
-            self._leader_observed_time = time.time()
+            # Use monotonic time: _leader_observed_time is used for a local TTL check
+            # (measuring elapsed time since leader was last observed), not for comparison
+            # with external timestamps, so monotonic time is appropriate.
+            self._leader_observed_time = time.monotonic()
 
         leader = leader_record.get(self._LEADER)
         try:
@@ -917,8 +918,10 @@ class Kubernetes(AbstractDCS):
             ttl = self._ttl
 
         # We want to check validity of the leader record only for our own cluster
+        # Using monotonic time for local TTL duration check (see above).
         if leader_path == self.leader_path and\
-                not (metadata and self._leader_observed_time and self._leader_observed_time + ttl >= time.time()):
+                not (metadata and self._leader_observed_time is not None
+                     and self._leader_observed_time + ttl >= time.monotonic()):
             leader = None
 
         if metadata:
@@ -976,7 +979,7 @@ class Kubernetes(AbstractDCS):
     ) -> Union[Cluster, Dict[int, Cluster]]:
         if TYPE_CHECKING:  # pragma: no cover
             assert self._retry.deadline is not None
-        stop_time = time.time() + self._retry.deadline
+        stop_time = time.monotonic() + self._retry.deadline
         self._api.refresh_api_servers_cache()
         try:
             with self._condition:
@@ -1272,6 +1275,17 @@ class Kubernetes(AbstractDCS):
         return self._update_leader_with_retry(annotations, resource_version, self.__ips)
 
     def attempt_to_acquire_leader(self) -> bool:
+        # Another member can acquire the lock after the HA loop decides to enter the election.
+        # Check the lock again and use the resource version from that same snapshot for the conditional write.
+        # REST requests can replace the shared DCS fields, so those fields may no longer match the snapshot we checked.
+        cluster = self.get_cluster()
+        if cluster.leader_name and cluster.leader_name != self._name:
+            logger.info('Could not take out TTL lock')
+            return False
+        resource_version = cluster.leader and cluster.leader.version
+        if TYPE_CHECKING:  # pragma: no cover
+            assert resource_version is None or isinstance(resource_version, str)
+
         now = self._isotime()
         annotations = {self._LEADER: self._name, 'ttl': str(self._ttl),
                        'renewTime': now, 'acquireTime': now, 'transitions': '0'}
@@ -1286,16 +1300,6 @@ class Kubernetes(AbstractDCS):
             else:
                 annotations['acquireTime'] = self._leader_observed_record.get('acquireTime') or now
             annotations['transitions'] = str(transitions)
-
-        resource_version = self._leader_resource_version
-        if resource_version:
-            kind = self._kinds.get(self.leader_path)
-            # If leader object in cache was updated we should better use fresh resource_version
-            if kind and kind.metadata.resource_version != resource_version:
-                kind_annotations = kind and kind.metadata.annotations or EMPTY_DICT
-                # But, only in case if leader annotations didn't change
-                if all(kind_annotations.get(k) == self._leader_observed_record.get(k) for k in annotations.keys()):
-                    resource_version = kind.metadata.resource_version
 
         retry = self._retry.copy()
 
