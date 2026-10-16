@@ -365,10 +365,11 @@ class TestPostgresql(BaseTestPostgresql):
         mock_read_auto = mock_open(read_data=read_data)
         mock_read_auto.return_value.__iter__ = lambda o: iter(o.readline, '')
         with patch('builtins.open', Mock(side_effect=[mock_open()(), mock_read_auto(), IOError])), \
-                patch('os.chmod', Mock()):
+                patch('os.chmod', Mock()), patch('os.fsync', Mock()):
             self.p.config.write_postgresql_conf()
 
-        with patch('builtins.open', Mock(side_effect=[mock_open()(), IOError])), patch('os.chmod', Mock()):
+        with patch('builtins.open', Mock(side_effect=[mock_open()(), IOError])), patch('os.chmod', Mock()), \
+                patch('os.fsync', Mock()):
             self.p.config.write_postgresql_conf()
         self.p.config.write_recovery_conf({'foo': 'bar'})
         self.p.config.write_postgresql_conf()
