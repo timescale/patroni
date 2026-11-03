@@ -276,7 +276,7 @@ class PostgresInit(unittest.TestCase):
                   'callbacks': {'on_start': 'true', 'on_stop': 'true', 'on_reload': 'true',
                                 'on_restart': 'true', 'on_role_change': 'true'},
                   'citus': {'group': 0, 'database': 'citus'}}
-        self.p = Postgresql(config, get_mpp(config))
+        self.p = Postgresql(config, get_mpp(config), None)
 
 
 class BaseTestPostgresql(PostgresInit):
