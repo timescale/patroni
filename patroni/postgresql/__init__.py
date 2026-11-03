@@ -1746,7 +1746,7 @@ class Postgresql(ClusterSite):
             logger.warning("Error writing state file: %s", e)
             return False
 
-    def read_state_file(self) -> dict[Any, Any]:
+    def read_state_file(self) -> Dict[Any, Any]:
         """Read data directory state.
 
         See update_state() for details about state.

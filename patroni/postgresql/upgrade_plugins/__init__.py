@@ -69,7 +69,7 @@ class UpgradePluginManager:
         self.prepare_plugins: List[UpgradePreparePlugin] = self._resolve_plugin_list('prepare')
         self.post_upgrade_plugins: List[UpgradePreparePlugin] = self._resolve_plugin_list('post_upgrade')
 
-    def _resolve_plugin_list(self, section_name: str) -> list[UpgradePreparePlugin]:
+    def _resolve_plugin_list(self, section_name: str) -> List[UpgradePreparePlugin]:
         plugin_configs = self.config.get(section_name, [])
         if not isinstance(plugin_configs, list):
             raise TypeError(f"'{section_name}' must be a list of plugins")
